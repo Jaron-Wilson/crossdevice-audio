@@ -160,6 +160,14 @@ The APK has nothing about any particular device built in.
   instead.
 - **Three hosts:** AirPods hold two connections at most.
 
+## Build notes
+
+Built in one night (about 5.5 hours) across three devices and two headsets. Seven routes were tried
+for AirPods on Windows before the two-device relay worked. The whole thing is about 1,250 lines of
+code, and none of it needs root, a driver or a Secure Boot change.
+
+<p align="center"><img src="docs/images/by-the-numbers.png" width="760" alt="By the numbers"></p>
+
 ## Credits
 
 - [LibrePods](https://github.com/librepods-org/librepods): AAP research and the Device ID trick.
