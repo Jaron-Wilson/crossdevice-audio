@@ -1,0 +1,11 @@
+[Unit]
+Description=Headphone panel (AirPods AAP + Crusher RFCOMM) on 127.0.0.1:8970
+After=bluetooth.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u %h/.local/share/headphone-panel/panel.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

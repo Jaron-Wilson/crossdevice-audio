@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="12dp" android:background="@drawable/bg">
+
+    <LinearLayout android:id="@+id/header" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:orientation="horizontal"
+        android:gravity="center_vertical" android:paddingBottom="6dp">
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Headphones" android:textColor="#E8EDF2" android:textSize="15sp"
+            android:textStyle="bold" />
+        <TextView android:id="@+id/status" android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="wrap_content" android:gravity="end" android:maxLines="1"
+            android:ellipsize="end" android:text="Tap to refresh" android:textColor="#8AA6B4"
+            android:textSize="12sp" android:paddingStart="8dp" />
+    </LinearLayout>
+
+    <LinearLayout android:id="@+id/ap_row" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+        <TextView android:id="@+id/ap_label" style="@style/Label" android:text="AirPods" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="40dp"
+            android:orientation="horizontal">
+            <TextView android:id="@+id/ap_off" style="@style/Btn" android:text="Off" />
+            <TextView android:id="@+id/ap_anc" style="@style/Btn" android:text="ANC" />
+            <TextView android:id="@+id/ap_tr" style="@style/Btn" android:text="Clear" />
+            <TextView android:id="@+id/ap_ad" style="@style/Btn" android:text="Adaptive" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout android:id="@+id/cr_row" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+        <TextView style="@style/Label" android:text="Crusher ANC 2" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="40dp"
+            android:orientation="horizontal">
+            <TextView android:id="@+id/cr_off" style="@style/Btn" android:text="Off" />
+            <TextView android:id="@+id/cr_anc" style="@style/Btn" android:text="ANC" />
+            <TextView android:id="@+id/cr_tr" style="@style/Btn" android:text="Clear" />
+        </LinearLayout>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="40dp"
+            android:orientation="horizontal" android:layout_marginTop="4dp">
+            <TextView android:id="@+id/cr_bdown" style="@style/Btn" android:text="Bass −" />
+            <TextView android:id="@+id/cr_bass" style="@style/Btn" android:background="@null"
+                android:textColor="#5FD0FF" android:text="Bass" />
+            <TextView android:id="@+id/cr_bup" style="@style/Btn" android:text="Bass +" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

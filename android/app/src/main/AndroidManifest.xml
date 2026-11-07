@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- to notice the AirPods connecting to this phone (hand-off with the laptop) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- read the AirPods' battery broadcast on the phone itself (no location use) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+
+    <application
+        android:label="Headphones"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false">
+
+        <!-- The app screen: pick your AirPods, optional laptop panel URL. -->
+        <activity
+            android:name=".SetupActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ACL connect/disconnect are exempt from the implicit-broadcast ban -->
+        <receiver
+            android:name=".BtReceiver"
+            android:exported="true"
+            android:permission="android.permission.BLUETOOTH_CONNECT">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".HeadphonesWidget"
+            android:exported="true"
+            android:label="Headphones">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/headphones_widget_info" />
+        </receiver>
+    </application>
+</manifest>
