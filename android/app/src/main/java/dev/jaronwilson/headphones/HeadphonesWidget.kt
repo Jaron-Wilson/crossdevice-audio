@@ -11,6 +11,8 @@ import android.widget.RemoteViews
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /**
@@ -36,11 +38,23 @@ class HeadphonesWidget : AppWidgetProvider() {
         // Show the choice at once (optimistic), then confirm with the panel's real state.
         render(context, optimistic(last, cmd), if (cmd == "refresh") "Refreshing…" else null)
         val pending = goAsync()
-        thread {
+        val app = context.applicationContext
+        if (cmd == "refresh") {
+            work.execute { try { refresh(app) } finally { pending.finish() } }
+            return
+        }
+        // Spamming buttons used to start one slow Bluetooth session per tap; they piled up and the OS
+        // froze the app until it was reopened. Now a single worker runs them one at a time and keeps
+        // only the LATEST choice per device, so rapid taps collapse to one quick action.
+        val dev = cmd.substringBefore(":")
+        latest[dev] = cmd.substringAfter(":", "")
+        work.execute {
             try {
-                val err = if (cmd == "refresh") null else runCatching { send(context, cmd) }.exceptionOrNull()
-                if (cmd == "refresh" || err == null) refresh(context)
-                else render(context, withPhoneBattery(context, fetch(context)), failText(context, cmd, err))
+                val arg = latest.remove(dev) ?: return@execute   // a newer tap already superseded this one
+                val full = "$dev:$arg"
+                val err = runCatching { send(app, full) }.exceptionOrNull()
+                if (err == null) refresh(app)
+                else render(app, withPhoneBattery(app, fetch(app)), failText(app, full, err))
             } finally {
                 pending.finish()
             }
@@ -52,6 +66,10 @@ class HeadphonesWidget : AppWidgetProvider() {
         private const val EXTRA_CMD = "cmd"
 
         @Volatile private var last: JSONObject? = null
+
+        // One worker for all taps (serialized), plus the latest pending arg per device (coalescing).
+        private val work = Executors.newSingleThreadExecutor()
+        private val latest = ConcurrentHashMap<String, String>()
 
         fun post(context: Context, path: String, body: String) = http(context, "POST", path, body)
 
