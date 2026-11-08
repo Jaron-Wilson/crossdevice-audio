@@ -85,7 +85,7 @@ class SetupActivity : Activity() {
             }
         }
         col.addView(open, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        status = label("", 13f, "#9FB")
+        status = label("", 13f, "#99FFBB")
         col.addView(status)
         col.addView(label("Then long-press your home screen, open Widgets and add Headphones.", 12f))
         setContentView(ScrollView(this).apply { addView(col); setBackgroundColor(Color.parseColor("#0F1419")) })
