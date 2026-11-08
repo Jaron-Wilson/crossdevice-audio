@@ -152,14 +152,23 @@ class HeadphonesWidget : AppWidgetProvider() {
                 "This phone's Bluetooth won't allow it. Hold the AirPods stem instead."
             else "Failed: ${err.message ?: err.javaClass.simpleName}"
 
-        /** When the phone has the AirPods, read mode + battery here (no laptop, no Tailscale). */
+        /** Fill in what the phone can see on its own (no laptop, no Tailscale): AirPods mode/battery
+         *  when they're on this phone, and the Crusher's live state when it's connected here. */
         private fun withPhoneBattery(context: Context, state: JSONObject?): JSONObject? {
-            if (!Handoff.local(context)) return state
-            val s = state?.let { JSONObject(it.toString()) } ?: JSONObject()
-            val ap = s.optJSONObject("airpods") ?: JSONObject().also { s.put("airpods", it) }
-            PhoneDirect.mode(context)?.let { ap.put("mode", it) }
-            if ((ap.optJSONObject("battery")?.length() ?: 0) == 0)
-                PhoneDirect.scanBattery(context)?.let { ap.put("battery", it) }
+            var s = state
+            if (Handoff.local(context)) {
+                val base = s?.let { JSONObject(it.toString()) } ?: JSONObject()
+                val ap = base.optJSONObject("airpods") ?: JSONObject().also { base.put("airpods", it) }
+                PhoneDirect.mode(context)?.let { ap.put("mode", it) }
+                if ((ap.optJSONObject("battery")?.length() ?: 0) == 0)
+                    PhoneDirect.scanBattery(context)?.let { ap.put("battery", it) }
+                s = base
+            }
+            if (CrusherDirect.connected(context)) {
+                val base = s?.let { JSONObject(it.toString()) } ?: JSONObject()
+                CrusherDirect.state(context)?.let { base.put("crusher", it) }
+                s = base
+            }
             return s
         }
 
@@ -169,13 +178,20 @@ class HeadphonesWidget : AppWidgetProvider() {
                 // phone has the AirPods: talk to them directly; otherwise via the laptop panel
                 "ap" -> if (Handoff.local(context)) PhoneDirect.setMode(context, arg)
                         else http(context, "POST", "/api/airpods/mode", arg)
-                "cr" -> when (arg) {
-                    "bass+", "bass-" -> {
-                        val cur = last?.optJSONObject("crusher")?.optInt("bass", 0) ?: 0
-                        val next = if (arg == "bass+") minOf(10, cur + 2) else maxOf(0, cur - 2)
-                        http(context, "POST", "/api/crusher/bass", next.toString())
+                // Crusher: control it straight from the phone when it's connected here (no laptop),
+                // otherwise fall back to the laptop panel.
+                "cr" -> {
+                    val onPhone = CrusherDirect.connected(context)
+                    when (arg) {
+                        "bass+", "bass-" -> {
+                            val cur = last?.optJSONObject("crusher")?.optInt("bass", 0) ?: 0
+                            val next = if (arg == "bass+") minOf(10, cur + 2) else maxOf(0, cur - 2)
+                            if (onPhone) CrusherDirect.setBass(context, next)
+                            else http(context, "POST", "/api/crusher/bass", next.toString())
+                        }
+                        else -> if (onPhone) CrusherDirect.setMode(context, arg)
+                                else http(context, "POST", "/api/crusher/mode", arg)
                     }
-                    else -> http(context, "POST", "/api/crusher/mode", arg)
                 }
             }
         }
@@ -192,7 +208,7 @@ class HeadphonesWidget : AppWidgetProvider() {
                 note != null -> note
                 onPhone -> "On this phone" + batteryText(ap).let { if (it.isEmpty()) "" else " · $it" } +
                     (if (PhoneDirect.status(context) == "fail") " · hold stem for modes" else "")
-                !Config.hasAirPods(context) && !Config.hasPanel(context) -> "Open the Headphones app to set up"
+                !Config.hasAirPods(context) && !Config.hasPanel(context) && !crOn -> "Open the Headphones app to set up"
                 state == null && !Config.hasPanel(context) -> "AirPods not connected to this phone"
                 state == null -> "Laptop not reachable. Is Tailscale on?"
                 !apOn && !crOn -> "No headphones connected"
