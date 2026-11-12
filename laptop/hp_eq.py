@@ -48,6 +48,15 @@ BANDS = MODEL["bands"]
 GMIN, GMAX = MODEL["gain_min"], MODEL["gain_max"]
 PRESETS = {p["key"]: p for p in MODEL["presets"]}
 LABEL = {"lowshelf": "bq_lowshelf", "peaking": "bq_peaking", "highshelf": "bq_highshelf"}
+SUBSONIC = MODEL.get("subsonic") or {"freq": 25, "q": 0.707}
+HP_OFF = 5.0               # the subsonic high-pass parked here when unused (transparent above ~15 Hz)
+
+
+def subsonic_freq(gains):
+    """The high-pass under the sub band: on only while the sub band is boosted."""
+    keys = [b["key"] for b in BANDS]
+    sub = gains[keys.index("sub")] if "sub" in keys and len(gains) > keys.index("sub") else 0.0
+    return float(SUBSONIC["freq"]) if sub > 0 else HP_OFF
 
 
 def clamp_gains(gains):
@@ -67,6 +76,8 @@ def _biquad_db(t, f0, q, g, f, fs=48000.0):
     r = 2 * math.sqrt(A) * a
     if t == "peaking":
         b, d = (1 + a * A, -2 * c, 1 - a * A), (1 + a / A, -2 * c, 1 - a / A)
+    elif t == "highpass":
+        b, d = ((1 + c) / 2, -(1 + c), (1 + c) / 2), (1 + a, -2 * c, 1 - a)
     elif t == "lowshelf":
         b = (A * ((A + 1) - (A - 1) * c + r), 2 * A * ((A - 1) - (A + 1) * c), A * ((A + 1) - (A - 1) * c - r))
         d = ((A + 1) + (A - 1) * c + r, -2 * ((A - 1) + (A + 1) * c), (A + 1) + (A - 1) * c - r)
@@ -83,7 +94,8 @@ def curve_peak(gains):
     best = 0.0
     for i in range(61):
         f = 40 * (16000 / 40) ** (i / 60)
-        best = max(best, sum(_biquad_db(b["type"], b["freq"], b["q"], g, f) for b, g in zip(BANDS, gains)))
+        best = max(best, sum(_biquad_db(b["type"], b["freq"], b["q"], g, f) for b, g in zip(BANDS, gains))
+                   + _biquad_db("highpass", subsonic_freq(gains), SUBSONIC["q"], 0, f))
     return best
 
 
@@ -98,6 +110,8 @@ def conf_text(gains, target):
     for b, g in zip(BANDS, gains):
         nodes.append({"type": "builtin", "name": b["key"], "label": LABEL[b["type"]],
                       "control": {"Freq": float(b["freq"]), "Q": float(b["q"]), "Gain": float(g)}})
+    nodes.append({"type": "builtin", "name": "subsonic", "label": "bq_highpass",
+                  "control": {"Freq": subsonic_freq(gains), "Q": float(SUBSONIC["q"])}})
     links = [{"output": f"{a['name']}:Out", "input": f"{b['name']}:In"} for a, b in zip(nodes, nodes[1:])]
     play = {"node.name": OUT, "node.passive": True}
     cap = {"node.name": SINK, "media.class": "Audio/Sink", "filter.smart": True,
@@ -241,7 +255,8 @@ class Eq:
         into = cur if cur and cur not in PANEL_SINKS else self.s.get("target", "")
         return {**self.s, "running": self.running(), "available": self.available(), "error": self.error,
                 "into": self.config.get("eq_target") or into, "headroom_db": preamp(self.s["gains"]),
-                "bands": BANDS, "presets": MODEL["presets"], "gain_min": GMIN, "gain_max": GMAX}
+                "bands": BANDS, "presets": MODEL["presets"], "gain_min": GMIN, "gain_max": GMAX,
+                "subsonic_hz": subsonic_freq(self.s["gains"]) if subsonic_freq(self.s["gains"]) > HP_OFF else 0}
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -283,6 +298,7 @@ class Eq:
             return False
         params = [f'"pre:Gain" {preamp(self.s["gains"])}']
         params += [f'"{b["key"]}:Gain" {g}' for b, g in zip(BANDS, self.s["gains"])]
+        params.append(f'"subsonic:Freq" {subsonic_freq(self.s["gains"])}')
         try:
             r = _run(["pw-cli", "set-param", str(nid), "Props", "{ params = [ " + " ".join(params) + " ] }"])
         except Exception:

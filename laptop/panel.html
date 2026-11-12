@@ -36,7 +36,8 @@ select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:
   <button id=cr_off onclick="cr('off')">Off</button></div></div>
  <div class=card><div class=k>Sensory bass (haptic)</div>
   <div class=row><input id=cr_bass type=range min=0 max=10 step=1 onchange="crbass(this.value)"><span class=lvl id=cr_lvl>–</span></div>
-  <div class=tg id=cr_bass_on_row><div>Sensory bass on</div><div class=sw id=cr_bass_on onclick="crset('bass_on',!this.classList.contains('on'))"></div></div></div>
+  <div class=tg id=cr_bass_on_row><div>Sensory bass on</div><div class=sw id=cr_bass_on onclick="crset('bass_on',!this.classList.contains('on'))"></div></div>
+  <div class=tg><div>Rumble<small>Sensory Bass on at 10: haptic bass you feel. Off puts your level back.</small></div><div class=sw id=rb_crusher onclick="rumble('crusher',!this.classList.contains('on'))"></div></div></div>
  <div class="card off" id=cr_extra><div class=k>Hear-through and more</div>
   <div id=cr_tl_row><div class=row><input id=cr_tl type=range min=0 max=100 step=5 onchange="crset('transparency_level',+this.value)"><span class=lvl id=cr_tl_v>–</span></div>
    <div class=ends><span>quieter outside</span><span>louder outside</span></div></div>
@@ -81,6 +82,7 @@ select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:
  <div class=dev>Sound (EQ on this laptop's output)</div>
  <div class=card>
   <div class=tg><div>Equalizer<small id=eq_where></small></div><div class=sw id=eq_on onclick="eqset({enabled:!this.classList.contains('on')})"></div></div>
+  <div class=tg><div>Rumble<small>sub-bass boost around 45 Hz for any headphones (AirPods too). Off puts your EQ back.</small></div><div class=sw id=rb_eq onclick="rumble('eq',!this.classList.contains('on'))"></div></div>
   <div class=seg id=eq_presets style="margin:10px 0"></div>
   <svg id=eqsvg viewBox="0 0 500 190"></svg>
   <div class=note id=eq_note>Drag the dots up or down. AirPods have no EQ of their own, so it's applied to the audio before it's sent.</div>
@@ -120,12 +122,14 @@ const FS=48000, FMIN=20, FMAX=20000;
 // RBJ cookbook biquads (the same filters PipeWire's bq_* and Equalizer APO use)
 function coef(t,f,q,g){const A=Math.pow(10,g/40),w=2*Math.PI*f/FS,c=Math.cos(w),a=Math.sin(w)/(2*q),r=2*Math.sqrt(A)*a;
  if(t=='peaking')return[1+a*A,-2*c,1-a*A,1+a/A,-2*c,1-a/A];
+ if(t=='highpass')return[(1+c)/2,-(1+c),(1+c)/2,1+a,-2*c,1-a];
  if(t=='lowshelf')return[A*((A+1)-(A-1)*c+r),2*A*((A-1)-(A+1)*c),A*((A+1)-(A-1)*c-r),(A+1)+(A-1)*c+r,-2*((A-1)+(A+1)*c),(A+1)+(A-1)*c-r];
  return[A*((A+1)+(A-1)*c+r),-2*A*((A-1)+(A+1)*c),A*((A+1)+(A-1)*c-r),(A+1)-(A-1)*c+r,2*((A-1)-(A+1)*c),(A+1)-(A-1)*c-r];}
 function magDb(cs,f){const w=2*Math.PI*f/FS;let db=0;for(const[b0,b1,b2,a0,a1,a2]of cs){
  const nr=b0+b1*Math.cos(w)+b2*Math.cos(2*w),ni=-(b1*Math.sin(w)+b2*Math.sin(2*w)),dr=a0+a1*Math.cos(w)+a2*Math.cos(2*w),di=-(a1*Math.sin(w)+a2*Math.sin(2*w));
  db+=10*Math.log10((nr*nr+ni*ni)/(dr*dr+di*di));}return db;}
-function curve(bands,g,n){const cs=bands.map((b,i)=>coef(b.type,b.freq,b.q,g[i]));const pts=[];
+function curve(bands,g,n){const cs=bands.map((b,i)=>coef(b.type,b.freq,b.q,g[i]||0));
+ const si=bands.findIndex(b=>b.key=='sub');if(si>=0&&(g[si]||0)>0&&EQ&&EQ.subsonic_hz!==undefined)cs.push(coef('highpass',25,0.707,0));const pts=[];
  for(let i=0;i<=n;i++){const f=FMIN*Math.pow(FMAX/FMIN,i/n);pts.push([i/n,magDb(cs,f)]);}return pts;}
 const fx=f=>Math.log(f/FMIN)/Math.log(FMAX/FMIN);
 function drawEq(){if(!EQ)return;const W=500,H=190,P=14,R=EQ.gain_max,y=d=>H/2-d/R*(H/2-P),x=u=>P+u*(W-2*P);
@@ -152,7 +156,7 @@ function renderEq(){if(!EQ)return;$('eqcard').className=EQ.available?'':'off';
  $('eq_on').className='sw'+(EQ.enabled?' on':'');
  $('eq_presets').innerHTML=EQ.presets.map(p=>`<button class="${EQ.preset==p.key?'on':''}" onclick="eqset({preset:'${p.key}',enabled:true})">${p.label}</button>`).join('')+
   `<button class="${EQ.preset=='custom'?'on':''}" disabled>Custom</button>`;
- $('eq_where').textContent=EQ.enabled?(EQ.running?'in front of '+(EQ.into||'the default output')+(EQ.headroom_db?` · headroom ${EQ.headroom_db} dB`:''):'waiting for the headphones'):'off';
+ $('eq_where').textContent=EQ.enabled?(EQ.running?'in front of '+(EQ.into||'the default output')+(EQ.headroom_db?` · headroom ${EQ.headroom_db} dB`:'')+(EQ.subsonic_hz?` · cut below ${EQ.subsonic_hz} Hz`:''):'waiting for the headphones'):'off';
  $('eq_note').textContent=EQ.error?('EQ: '+EQ.error):"Drag the dots up or down. AirPods have no EQ of their own, so it's applied to the audio before it's sent.";
  drawEq();}
 function sw(id,v){const e=$(id);e.className='sw'+(v===true?' on':'')+(v==null?' na':'');}
@@ -188,6 +192,7 @@ async function load(){let s=await (await fetch('/api/state')).json();S=s;
  renderPh();
  let bt=a.battery||{},parts=[];for(const k of ['left','right','case'])if(bt[k])parts.push(k[0].toUpperCase()+' '+bt[k].level+'%');
  ap_batt.textContent=parts.join('  ');
+ const rb=s.rumble||{};sw('rb_eq',!!rb.eq);sw('rb_crusher',!!rb.crusher);
  if(s.spatial&&SP.mode!='tracked'){SP=s.spatial;renderSp();}
  if(s.eq&&drag<0){EQ=s.eq;if(EQ.gains)gains=EQ.gains.slice();renderEq();}
  $('none').className=(c.online||a.online)?'off':'';}
@@ -214,6 +219,7 @@ async function post(u,b){const r=await fetch(u,{method:'POST',body:b});if(!r.ok)
 async function apset(name,value){const r=await post('/api/airpods/setting',JSON.stringify({name,value}));
  if(r.ok){const j=await r.json();S.airpods=Object.assign(S.airpods||{},{settings:j.settings,reported:j.reported});renderPh();}setTimeout(load,500)}
 async function crset(name,value){await post('/api/crusher/setting',JSON.stringify({name,value}));setTimeout(load,400)}
+async function rumble(device,on){const r=await post('/api/rumble',JSON.stringify({device,on}));if(r.ok){S.rumble=await r.json();sw('rb_'+device,S.rumble[device]);}setTimeout(load,600);}
 async function cr(m){await post('/api/crusher/mode',m);setTimeout(load,400)}
 async function crbass(v){cr_lvl.textContent=v+'/10';await post('/api/crusher/bass',v)}
 async function ap(m){await post('/api/airpods/mode',m);setTimeout(load,500)}

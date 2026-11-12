@@ -370,7 +370,9 @@ def _capture(play_target, monitor, wav, secs):
                             "--format", "float32le", "--raw", "--latency-msec", "20"],
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
     time.sleep(0.5)
-    _run(["pw-play", "--target", play_target, wav], timeout=secs + 10)
+    # never let a test tone fall back to the default output (the headphones someone is wearing)
+    _run(["pw-play", "--target", play_target, "-P", "{ node.dont-fallback = true node.dont-reconnect = true }",
+          wav], timeout=secs + 10)
     time.sleep(0.4)
     os.killpg(rec.pid, signal.SIGTERM)
     data = rec.stdout.read()
@@ -409,6 +411,8 @@ def measure(graph, tones, channels=2, secs=1.6):
                 "sink_properties=device.description=PanelFilterTest node.passive=true priority.session=0"]).stdout.strip()
     proc = None
     try:
+        if not mod.isdigit() or null not in _names("sinks").values():
+            return {"error": "could not create the silent test sink"}
         pos = ["FL", "FR"] if channels == 2 else ["MONO"]
         with open(conf, "w") as f:
             f.write(_conf_text({"node.description": "Panel filter test", "media.name": "Panel filter test",

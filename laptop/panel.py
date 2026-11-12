@@ -72,7 +72,7 @@ def crusher_cache_set(**kw):
 def crusher_setting(name, value):
     """Set one of the Crusher extras. Returns the AT reply."""
     if name == "bass_on":
-        cmd = f"AT.CRUSHER=state,{'on' if value else 'off'}"
+        cmd = f"AT.CRUSHER={'on' if value else 'off'}"   # Skull-iQ: CRUSHER_SET_STATE = "AT.CRUSHER=" + on|off
     elif name == "transparency_level":
         cmd = f"AT.UIAUDIO=transparency,,{max(0, min(100, int(value)))}"
     elif name in ("at_on_call", "at_on_pause"):
@@ -467,6 +467,68 @@ threading.Thread(target=eq_loop, daemon=True).start()
 def eq_state():
     return EQ.state() if EQ else {"available": False, "error": EQ_ERR}
 
+# ---- Rumble: one switch per device. EQ (any headphones): the "rumble" preset (sub-bass band +
+# subsonic high-pass). Crusher: Sensory Bass on at 10 (real haptic bass). Off puts back what was there.
+RUMBLE_FILE = os.path.expanduser("~/.config/headphone-panel/rumble.json")
+RUMBLE_LOCK = threading.Lock()
+def _rumble_saved():
+    try: return json.load(open(RUMBLE_FILE))
+    except (OSError, ValueError): return {}
+def _rumble_save(d):
+    os.makedirs(os.path.dirname(RUMBLE_FILE), exist_ok=True)
+    with open(RUMBLE_FILE, "w") as f: json.dump(d, f)
+def rumble_state():
+    d = _rumble_saved()
+    eq_on = bool(EQ and EQ.s.get("enabled") and EQ.s.get("preset") == "rumble")
+    return {"eq": eq_on, "crusher": bool(d.get("crusher"))}
+def rumble(device, on):
+    with RUMBLE_LOCK:
+        d = _rumble_saved()
+        if device == "eq":
+            if not EQ: raise RuntimeError("EQ unavailable")
+            if on:
+                if EQ.s.get("preset") != "rumble" or not EQ.s.get("enabled"):
+                    d["eq"] = {"enabled": EQ.s["enabled"], "preset": EQ.s["preset"], "gains": EQ.s["gains"]}
+                EQ.set(enabled=True, preset="rumble")
+            else:
+                prev = d.pop("eq", None)
+                if not prev:                       # nothing saved: just leave the Rumble preset
+                    prev = {"enabled": EQ.s["enabled"], "preset": "flat", "gains": None}
+                if prev.get("preset") in hp_eq.PRESETS and prev["preset"] != "rumble":
+                    EQ.set(enabled=prev["enabled"], preset=prev["preset"])
+                elif prev.get("gains"):
+                    EQ.set(enabled=prev["enabled"], gains=prev["gains"])
+                else:
+                    EQ.set(enabled=False, preset="flat")
+        elif device == "crusher":
+            if not crusher_connected(): raise RuntimeError("Crusher not connected")
+            if on:
+                cur = crusher_state_live()
+                if not cur.get("online"): raise RuntimeError(cur.get("error") or "Crusher not answering")
+                if not d.get("crusher"):
+                    d["crusher"] = {"bass_on": cur.get("bass_on"), "bass": cur.get("bass")}
+                with CR_LOCK: r = cr_at(["AT.CRUSHER=on", "AT.CRUSHER=level,10"])
+                crusher_cache_set(bass_on=True, bass=10)
+            else:
+                prev = d.pop("crusher", None)
+                if not prev:                       # nothing saved: leave the Crusher as it is
+                    _rumble_save(d)
+                    return rumble_state()
+                cmds = []
+                if prev.get("bass") is not None:
+                    cmds.append(f"AT.CRUSHER=level,{max(0, min(10, int(prev['bass'])))}")
+                if prev.get("bass_on") is False: cmds.append("AT.CRUSHER=off")
+                r = ""
+                if cmds:
+                    with CR_LOCK: r = cr_at(cmds)
+                    crusher_cache_set(**({"bass": int(prev["bass"])} if prev.get("bass") is not None else {}),
+                                      bass_on=prev.get("bass_on") is not False)
+            if "ERROR" in r: raise RuntimeError("Crusher refused: " + r.strip()[:80])
+        else:
+            raise ValueError("device must be eq or crusher")
+        _rumble_save(d)
+    return rumble_state()
+
 # ---- Sound viewer + notch filters, see hp_sound.py ----
 try:
     import hp_sound
@@ -573,7 +635,7 @@ class H(BaseHTTPRequestHandler):
                                            "eq":bool(EQ and EQ.available())}))
         if self.path=="/api/state":
             return self._s(200,json.dumps({"crusher":crusher_state(),"airpods":AP.state(),"eq":eq_state(),
-                                           "spatial":spatial_state()}))
+                                           "spatial":spatial_state(),"rumble":rumble_state()}))
         if self.path=="/api/spatial":
             return self._s(200,json.dumps(spatial_state()))
         if self.path=="/api/eq":
@@ -624,6 +686,9 @@ class H(BaseHTTPRequestHandler):
                 j=json.loads(body or "{}")
                 if j.get("kind") not in NOTCH: return self._s(400,json.dumps({"error":"kind must be mic or output"}))
                 return self._s(200,json.dumps(NOTCH[j["kind"]].set(j.get("freqs") or [], hum=bool(j.get("hum")))))
+            if self.path=="/api/rumble":
+                j=json.loads(body or "{}")
+                return self._s(200,json.dumps(rumble(j.get("device"), bool(j.get("on")))))
             if self.path=="/api/spatial":
                 if not SPATIAL: return self._s(503,json.dumps({"error":SPATIAL_ERR}))
                 return self._s(200,json.dumps({"available":True,**spatial_set(json.loads(body or "{}").get("mode","off"))}))

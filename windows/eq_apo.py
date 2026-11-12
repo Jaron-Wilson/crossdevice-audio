@@ -71,6 +71,10 @@ def render(model, state):
     lines.append(f"Preamp: {-max([0.0] + gains):.1f} dB")          # headroom so boosts don't clip
     for i, (b, g) in enumerate(zip(model["bands"], gains), 1):
         lines.append(f"Filter {i}: ON {APO_TYPE[b['type']]} Fc {b['freq']} Hz Gain {g:.1f} dB Q {b['q']}")
+    keys = [b["key"] for b in model["bands"]]
+    sub = model.get("subsonic")
+    if sub and "sub" in keys and gains[keys.index("sub")] > 0:      # cut below the sub-bass boost
+        lines.append(f"Filter {len(keys) + 1}: ON HPQ Fc {sub['freq']} Hz Q {sub['q']}")
     return "\n".join(lines) + "\n"
 
 
