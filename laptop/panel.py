@@ -19,6 +19,9 @@ except (OSError, ValueError):
 CR_MAC = CONFIG.get("crusher_mac", ""); CR_CH = int(CONFIG.get("crusher_channel", 9))
 CR_LOCK = threading.Lock()
 def cr_at(cmds, timeout=5.0):
+    return "\n".join(cr_at_each(cmds, timeout))
+def cr_at_each(cmds, timeout=5.0):
+    """Send AT commands over one RFCOMM session; returns one reply string per command."""
     last = None
     for _ in range(4):
         try:
@@ -42,7 +45,7 @@ def cr_at(cmds, timeout=5.0):
             out.append(buf.decode(errors="replace"))
     finally:
         s.close()
-    return "\n".join(out)
+    return out
 def crusher_connected():
     """Fast: ask BlueZ whether the Crusher has a link (no RFCOMM attempt, so no multi-second timeout)."""
     import subprocess
@@ -55,16 +58,68 @@ CR_CACHE = {"t": 0.0, "v": None}
 def crusher_state(max_age=20.0):
     """Crusher state, cached: an RFCOMM query takes 1-2 s, and the widget/ring read this often."""
     if not crusher_connected():
-        CR_CACHE["v"] = None
+        CR_CACHE["v"] = None; CR_EXTRAS["v"] = None
         return {"online": False, "error": "not connected"}
     if CR_CACHE["v"] is not None and time.time() - CR_CACHE["t"] < max_age:
         return CR_CACHE["v"]
     v = crusher_state_live()
     if v.get("online"):
+        v["extras"] = crusher_extras()
         CR_CACHE.update(t=time.time(), v=v)
     return v
 def crusher_cache_set(**kw):
     if CR_CACHE["v"]: CR_CACHE["v"] = {**CR_CACHE["v"], **kw}
+def crusher_setting(name, value):
+    """Set one of the Crusher extras. Returns the AT reply."""
+    if name == "bass_on":
+        cmd = f"AT.CRUSHER=state,{'on' if value else 'off'}"
+    elif name == "transparency_level":
+        cmd = f"AT.UIAUDIO=transparency,,{max(0, min(100, int(value)))}"
+    elif name in ("at_on_call", "at_on_pause"):
+        cmd = f"AT.UIAUDIO={'atoncall' if name == 'at_on_call' else 'atonpause'},{'on' if value else 'off'}"
+    elif name == "anc_filter":
+        v = "off" if value in ("off", None) else str(max(0, min(255, int(value))))
+        cmd = f"AT.UIAUDIO=anc_filter,{v}"
+    else:
+        raise ValueError("unknown Crusher setting")
+    with CR_LOCK: r = cr_at([cmd])
+    if not _cr_answered(r):
+        raise RuntimeError(f"Crusher refused {cmd}: {r.strip()[:80]}")
+    if name == "bass_on":
+        crusher_cache_set(bass_on=bool(value))
+    else:
+        if CR_EXTRAS["v"] is not None: CR_EXTRAS["v"][name] = value if name != "transparency_level" else int(value)
+        if CR_CACHE["v"]: CR_CACHE["v"]["extras"] = CR_EXTRAS["v"] or {}
+    return r
+# Extras found in Skull-iQ's AT code (generic Bragi AT commands, see docs/PROTOCOL.md). Not every
+# firmware implements them, so each is read once per connection and only offered if it answered.
+CR_EXTRA_Q = {"transparency_level": "AT.UIAUDIO=transparency", "at_on_call": "AT.UIAUDIO=atoncall",
+              "at_on_pause": "AT.UIAUDIO=atonpause", "anc_filter": "AT.UIAUDIO=anc_filter"}
+CR_EXTRAS = {"v": None}
+def _cr_answered(r):
+    return "OK" in r and "ERROR" not in r
+def parse_cr_extras(replies):
+    out = {}
+    for (k, _), r in zip(CR_EXTRA_Q.items(), replies):
+        if not _cr_answered(r):
+            continue
+        if k == "transparency_level":
+            m = re.search(r":\s*(?:on|off)?\s*,\s*(\d+)", r)
+            if m: out[k] = int(m.group(1))
+        elif k == "anc_filter":
+            m = re.search(r":\s*(\d+|off)", r)
+            if m: out[k] = m.group(1) if m.group(1) == "off" else int(m.group(1))
+        else:
+            m = re.search(r":\s*(on|off)", r)
+            if m: out[k] = m.group(1) == "on"
+    return out
+def crusher_extras():
+    if CR_EXTRAS["v"] is None:
+        try:
+            with CR_LOCK: CR_EXTRAS["v"] = parse_cr_extras(cr_at_each(list(CR_EXTRA_Q.values())))
+        except Exception:
+            return {}
+    return CR_EXTRAS["v"]
 def crusher_state_live():
     try:
         with CR_LOCK: txt = cr_at(["AT.UIAUDIO?","AT.CRUSHER?"])
@@ -76,6 +131,7 @@ def crusher_state_live():
             "anc": get(r"anc:\s*(on|off)")=="on",
             "transparency": get(r"transparency:\s*(on|off)")=="on",
             "bass": int(lvl.group(1)) if lvl else None,
+            "bass_on": (get(r"(?i)state:\s*(on|off)") or "").lower() == "on" if get(r"(?i)state:\s*(on|off)") else None,
             "bass_max": int(lvl.group(2)) if lvl else 10}
 
 # ---- AirPods (AAP over L2CAP, persistent) ----
@@ -84,6 +140,36 @@ HS=bytes.fromhex("00000400010002000000000000000000")
 NOTIFY=bytes.fromhex("040004000F00FFFFFEFF"); FEAT=bytes.fromhex("040004004D00FF00000000000000")
 NC=bytes.fromhex("0400040009000d"); BAT=bytes.fromhex("040004000400")
 MODE={"off":1,"anc":2,"transparency":3,"adaptive":4}; MNAME={1:"off",2:"anc",3:"transparency",4:"adaptive"}
+# AAP control commands (04 00 04 00 09 00 <id> <4 data bytes>), ids from LibrePods' docs/source.
+# The AirPods push the current value of each after the notification request, and echo every change.
+CTL_HDR = bytes.fromhex("040004000900")
+AP_SETTINGS = {                       # name: (id, kind)
+    "adaptive_level": (0x2E, "level"),            # 0-100: 0 lets the most noise in, 100 filters the most
+    "conversational_awareness": (0x28, "bool"),
+    "personalized_volume": (0x26, "bool"),
+    "ear_detection": (0x0A, "bool"),
+    "press_hold_modes": (0x1A, "mask"),           # which modes a stem press-and-hold cycles through
+    "allow_off": (0x34, "bool"),                  # offer "Off" in that cycle
+    "one_bud_anc": (0x1B, "bool"),                # noise cancelling with one AirPod in
+}
+MASK_BITS = {"off": 1, "anc": 2, "transparency": 4, "adaptive": 8}
+def ap_encode(name, value):
+    cid, kind = AP_SETTINGS[name]
+    if kind == "bool":
+        b = 1 if value in (True, 1, "1", "on", "true") else 2
+    elif kind == "level":
+        b = max(0, min(100, int(value)))
+    else:
+        modes = value if isinstance(value, list) else str(value).split(",")
+        b = sum(MASK_BITS[m] for m in set(modes) if m in MASK_BITS)
+        if bin(b).count("1") < 2:
+            raise ValueError("press and hold needs at least two modes")
+    return CTL_HDR + bytes([cid, b, 0, 0, 0])
+def ap_decode(kind, data):
+    v = data[0]
+    if kind == "bool": return {1: True, 2: False}.get(v)
+    if kind == "level": return v
+    return [m for m, bit in MASK_BITS.items() if v & bit]
 BT={2:"left",4:"right",8:"case"}; BS={1:"discharging",2:"charging",4:"disconnected"}
 # ---- AirPods battery from their BLE "proximity pairing" broadcast (Apple 0x004C, type 0x07).
 # Works whichever host is playing: the AAP battery reports only reach the active host.
@@ -139,7 +225,7 @@ class AirPods(threading.Thread):
     def __init__(self):
         super().__init__()
         self.sock=None; self.lock=threading.Lock()
-        self.mode=None; self.battery={}; self.online=False
+        self.mode=None; self.battery={}; self.online=False; self.ctl={}
         self.wake = threading.Event()
         try: self.phone = open(HANDOFF_FILE).read().strip() == "phone"
         except OSError: self.phone = False
@@ -155,6 +241,7 @@ class AirPods(threading.Thread):
             subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
         self.wake.set()
     def _parse(self,p):
+        if p[:6]==CTL_HDR and len(p)>=8: self.ctl[p[6]]=bytes(p[7:11])
         i=p.find(NC)
         if i>=0 and len(p)>i+7: self.mode=p[i+7]
         j=p.find(BAT)
@@ -191,7 +278,7 @@ class AirPods(threading.Thread):
             except Exception:
                 pass
             with self.lock: self.sock=None
-            self.online=False; self.mode=None; self.battery={}
+            self.online=False; self.mode=None; self.battery={}; self.ctl={}
             if self.phone:
                 subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
             # long backoff (a short one fights another host); a hand-off back wakes us at once
@@ -203,66 +290,42 @@ class AirPods(threading.Thread):
                 self.sock.sendall(bytes.fromhex("0400040009000D")+bytes([MODE[name],0,0,0])); return True
             except Exception:
                 return False
+    def set_setting(self, name, value):
+        pkt = ap_encode(name, value)
+        with self.lock:
+            if not self.sock: return False
+            try: self.sock.sendall(pkt)
+            except Exception: return False
+        self.ctl[pkt[6]] = pkt[7:11]      # optimistic; the AirPods' echo overwrites it
+        return True
+    def settings(self):
+        """Last value the AirPods reported for each setting; None = not reported yet."""
+        return {n: (ap_decode(k, self.ctl[i]) if i in self.ctl else None) for n, (i, k) in AP_SETTINGS.items()}
     def state(self):
         bat = self.battery
         if not bat and time.time() - BLE["t"] < 300:
             bat = BLE["battery"]
         return {"online": self.online, "mode": MNAME.get(self.mode, self.mode), "battery": bat,
-                "on_phone": self.phone}
+                "on_phone": self.phone, "settings": self.settings()}
 
 AP = AirPods(); AP.start()
 
-HTML = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Headphones</title><style>
-body{font:17px/1.5 system-ui,sans-serif;background:#0f1419;color:#e8edf2;margin:0;padding:22px;max-width:480px}
-h1{font-size:20px;margin:0 0 4px}.dev{font-size:17px;font-weight:700;margin:0 0 10px}
-.card{background:#1a2230;border:1px solid #2b3647;border-radius:14px;padding:16px 18px;margin:14px 0}
-.k{color:#8aa6b4;font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
-.seg{display:flex;gap:8px}.seg button{flex:1}
-button{font:600 15px system-ui;border:0;border-radius:10px;padding:11px 10px;color:#fff;background:#273345;cursor:pointer}
-button.on{background:#2f7d4f}button:active{transform:scale(.97)}
-input[type=range]{width:100%;accent-color:#3fa7ff;height:28px}
-.row{display:flex;justify-content:space-between;align-items:center;gap:12px}
-.lvl{font-size:26px;font-weight:700;color:#5fd0ff;min-width:50px;text-align:right}
-.batt{color:#9fb;font-size:14px}.off{display:none}#none{color:#8aa6b4}
-</style>
-<h1>🎧 Headphones</h1>
-<div id=none class=off>No controllable headphones connected.</div>
-<div id=cr>
- <div class=dev>Crusher ANC 2</div>
- <div class=card><div class=k>Listening mode</div><div class=seg>
-  <button id=cr_anc onclick="cr('anc')">ANC</button>
-  <button id=cr_tr onclick="cr('transparency')">Transparency</button>
-  <button id=cr_off onclick="cr('off')">Off</button></div></div>
- <div class=card><div class=k>Crusher bass</div>
-  <div class=row><input id=cr_bass type=range min=0 max=10 step=1 onchange="crbass(this.value)"><span class=lvl id=cr_lvl>–</span></div></div>
-</div>
-<div id=ap>
- <div class=dev>AirPods Pro <span id=ap_batt class=batt></span></div>
- <div class=card><div class=k>Noise control</div><div class=seg>
-  <button id=ap_off onclick="ap('off')">Off</button>
-  <button id=ap_anc onclick="ap('anc')">ANC</button>
-  <button id=ap_tr onclick="ap('transparency')">Transp.</button>
-  <button id=ap_ad onclick="ap('adaptive')">Adaptive</button></div></div>
-</div>
-<script>
-async function load(){let s=await (await fetch('/api/state')).json();
- let c=s.crusher||{};
- cr_anc.className=c.anc?'on':'';cr_tr.className=c.transparency?'on':'';cr_off.className=(c.online&&!c.anc&&!c.transparency)?'on':'';
- document.getElementById('cr').className=c.online?'':'off';
- if(c.bass!=null){cr_bass.value=c.bass;cr_lvl.textContent=c.bass+'/'+(c.bass_max||10);}
- let a=s.airpods||{};
- for(const [k,id] of [['off','ap_off'],['anc','ap_anc'],['transparency','ap_tr'],['adaptive','ap_ad']])
-   document.getElementById(id).className=(a.mode===k)?'on':'';
- document.getElementById('ap').className=a.online?'':'off';
- let bt=a.battery||{},parts=[];for(const k of ['left','right','case'])if(bt[k])parts.push(k[0].toUpperCase()+' '+bt[k].level+'%');
- ap_batt.textContent=parts.join('  ');
- document.getElementById('none').className=(c.online||a.online)?'off':'';}
-async function cr(m){await fetch('/api/crusher/mode',{method:'POST',body:m});setTimeout(load,400)}
-async function crbass(v){cr_lvl.textContent=v+'/10';await fetch('/api/crusher/bass',{method:'POST',body:v})}
-async function ap(m){await fetch('/api/airpods/mode',{method:'POST',body:m});setTimeout(load,500)}
-load();setInterval(load,4000);
-</script>"""
+# ---- Source-side EQ (PipeWire filter-chain), see hp_eq.py ----
+try:
+    import hp_eq
+    EQ = hp_eq.Eq(CONFIG)
+except Exception as e:      # missing eq_presets.json etc.: the rest of the panel still works
+    EQ = None; EQ_ERR = str(e)
+def eq_loop():
+    while EQ:
+        try: EQ.tick()
+        except Exception: pass
+        time.sleep(5)
+threading.Thread(target=eq_loop, daemon=True).start()
+def eq_state():
+    return EQ.state() if EQ else {"available": False, "error": EQ_ERR}
+
+HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html"), encoding="utf-8").read()
 
 class H(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
@@ -273,9 +336,12 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/" : return self._s(200,HTML,"text/html; charset=utf-8")
         if self.path=="/api/caps":
             # which controls exist right now: the flick ring hides the rest
-            return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online}))
+            return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online,
+                                           "eq":bool(EQ and EQ.available())}))
         if self.path=="/api/state":
-            return self._s(200,json.dumps({"crusher":crusher_state(),"airpods":AP.state()}))
+            return self._s(200,json.dumps({"crusher":crusher_state(),"airpods":AP.state(),"eq":eq_state()}))
+        if self.path=="/api/eq":
+            return self._s(200,json.dumps(eq_state()))
         self._s(404,"{}")
     def do_POST(self):
         n=int(self.headers.get("content-length",0)); body=self.rfile.read(n).decode().strip()
@@ -295,14 +361,38 @@ class H(BaseHTTPRequestHandler):
                 if body not in ("phone","laptop"): return self._s(400,json.dumps({"error":"phone|laptop"}))
                 threading.Thread(target=AP.set_handoff, args=(body=="phone",), daemon=True).start()
                 return self._s(200,json.dumps({"ok":True,"airpods_with":body}))
+            if self.path=="/api/airpods/setting":
+                j=json.loads(body or "{}")
+                if j.get("name") not in AP_SETTINGS: return self._s(400,json.dumps({"error":"unknown setting"}))
+                ok=AP.set_setting(j["name"], j.get("value"))
+                return self._s(200 if ok else 503,json.dumps({"settings":AP.settings()}) if ok else json.dumps({"error":"AirPods not connected"}))
+            if self.path=="/api/crusher/setting":
+                j=json.loads(body or "{}")
+                crusher_setting(j.get("name"), j.get("value"))
+                return self._s(200,"{}")
+            if self.path in ("/api/eq","/api/eq/cycle"):
+                if not EQ: return self._s(503,json.dumps({"error":EQ_ERR}))
+                if self.path=="/api/eq/cycle": return self._s(200,json.dumps(EQ.cycle()))
+                j=json.loads(body or "{}")
+                return self._s(200,json.dumps(EQ.set(enabled=j.get("enabled"),preset=j.get("preset"),gains=j.get("gains"))))
             if self.path=="/api/airpods/mode":
                 if body not in MODE: return self._s(400,json.dumps({"error":"unknown mode"}))
                 ok=AP.set_mode(body)
                 return self._s(200 if ok else 503,"{}" if ok else json.dumps({"error":"AirPods not connected"}))
+        except ValueError as e:
+            return self._s(400,json.dumps({"error":str(e)}))
         except Exception as e:
             return self._s(500,json.dumps({"error":str(e)}))
         self._s(404,"{}")
 
 if __name__=="__main__":
+    import signal, sys
+    def bye(*_):
+        if EQ: EQ.shutdown()      # put the real headphones back as the default output
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, bye)
     print(f"panel on 127.0.0.1:{PORT}")
-    ThreadingHTTPServer(("127.0.0.1",PORT),H).serve_forever()
+    try:
+        ThreadingHTTPServer(("127.0.0.1",PORT),H).serve_forever()
+    finally:
+        if EQ: EQ.shutdown()

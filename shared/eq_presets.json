@@ -1,0 +1,18 @@
+{
+  "_comment": "Shared EQ model for every platform: the laptop panel (PipeWire filter-chain), the Android app (audiofx) and Windows (Equalizer APO). Gains are in dB. Shelves use Q 0.707, peaks Q 1.0.",
+  "gain_min": -12,
+  "gain_max": 12,
+  "bands": [
+    {"key": "bass",     "label": "Bass",     "type": "lowshelf",  "freq": 80,    "q": 0.707},
+    {"key": "lowmid",   "label": "Low-mid",  "type": "peaking",   "freq": 250,   "q": 1.0},
+    {"key": "mid",      "label": "Mid",      "type": "peaking",   "freq": 1000,  "q": 1.0},
+    {"key": "highmid",  "label": "High-mid", "type": "peaking",   "freq": 3500,  "q": 1.0},
+    {"key": "treble",   "label": "Treble",   "type": "highshelf", "freq": 10000, "q": 0.707}
+  ],
+  "presets": [
+    {"key": "flat",   "label": "Flat",          "gains": [0, 0, 0, 0, 0]},
+    {"key": "bass",   "label": "Bass boost",    "gains": [6, 2, 0, 0, 0]},
+    {"key": "vocal",  "label": "Vocal/Podcast", "gains": [-3, -1, 2, 4, 1]},
+    {"key": "treble", "label": "Treble",        "gains": [0, 0, 0, 2, 5]}
+  ]
+}
