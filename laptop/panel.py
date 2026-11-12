@@ -113,10 +113,23 @@ def parse_cr_extras(replies):
             m = re.search(r":\s*(on|off)", r)
             if m: out[k] = m.group(1) == "on"
     return out
+def parse_cr_features(r):
+    """AT.FEATURE=info,0,<n> lists the firmware's feature flags: name,id,policy,?,enabled|disabled.
+    Read-only here: Skull-iQ's enable command is never sent."""
+    out = []
+    for m in re.finditer(r"\.FEATURE:\s*([^,|\r\n]+),([^,]+),[^,]*,[^,]*,(enabled|disabled)", r):
+        out.append({"name": m.group(1).strip(), "enabled": m.group(3) == "enabled"})
+    return out
 def crusher_extras():
     if CR_EXTRAS["v"] is None:
         try:
-            with CR_LOCK: CR_EXTRAS["v"] = parse_cr_extras(cr_at_each(list(CR_EXTRA_Q.values())))
+            with CR_LOCK:
+                v = parse_cr_extras(cr_at_each(list(CR_EXTRA_Q.values())))
+                cnt = re.search(r"(\d+)", cr_at_each(["AT.FEATURE=count"])[0])
+                if cnt and int(cnt.group(1)) > 0:
+                    f = parse_cr_features(cr_at_each([f"AT.FEATURE=info,0,{min(16, int(cnt.group(1)))}"])[0])
+                    if f: v["features"] = f
+            CR_EXTRAS["v"] = v
         except Exception:
             return {}
     return CR_EXTRAS["v"]

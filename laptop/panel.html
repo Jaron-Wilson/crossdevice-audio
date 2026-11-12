@@ -37,11 +37,12 @@ select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:
  <div class=card><div class=k>Sensory bass (haptic)</div>
   <div class=row><input id=cr_bass type=range min=0 max=10 step=1 onchange="crbass(this.value)"><span class=lvl id=cr_lvl>–</span></div>
   <div class=tg id=cr_bass_on_row><div>Sensory bass on</div><div class=sw id=cr_bass_on onclick="crset('bass_on',!this.classList.contains('on'))"></div></div></div>
- <div class="card off" id=cr_extra><div class=k>Transparency</div>
+ <div class="card off" id=cr_extra><div class=k>Hear-through and more</div>
   <div id=cr_tl_row><div class=row><input id=cr_tl type=range min=0 max=100 step=5 onchange="crset('transparency_level',+this.value)"><span class=lvl id=cr_tl_v>–</span></div>
    <div class=ends><span>quieter outside</span><span>louder outside</span></div></div>
   <div class=tg id=cr_call_row><div>Hear-through on calls</div><div class=sw id=cr_call onclick="crset('at_on_call',!this.classList.contains('on'))"></div></div>
   <div class=tg id=cr_pause_row><div>Hear-through when paused</div><div class=sw id=cr_pause onclick="crset('at_on_pause',!this.classList.contains('on'))"></div></div>
+  <div class=note id=cr_feat></div>
  </div>
 </div>
 
@@ -164,6 +165,7 @@ async function load(){let s=await (await fetch('/api/state')).json();S=s;
  $('cr_tl_row').className='transparency_level' in x?'':'off';if(x.transparency_level!=null){cr_tl.value=x.transparency_level;cr_tl_v.textContent=x.transparency_level;}
  $('cr_call_row').className='at_on_call' in x?'tg':'tg off';sw('cr_call',x.at_on_call);
  $('cr_pause_row').className='at_on_pause' in x?'tg':'tg off';sw('cr_pause',x.at_on_pause);
+ $('cr_feat').textContent=x.features?'Firmware features (read-only): '+x.features.map(f=>f.name+(f.enabled?' on':' off')).join(', '):'';
  let a=s.airpods||{},st=a.settings||{};
  for(const [k,id] of [['off','ap_off'],['anc','ap_anc'],['transparency','ap_tr'],['adaptive','ap_ad']])$(id).className=(a.mode===k)?'on':'';
  $('ap').className=a.online?'':'off';
