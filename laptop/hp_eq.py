@@ -9,9 +9,10 @@ output (or of `eq_target` from config.json), so whatever plays to the headphones
     is the AirPods' own (AVRCP absolute) volume, and the EQ sink itself always passes at 100%.
   * Band changes are applied live with `pw-cli set-param` (no audio gap); if that fails the process is
     restarted with the new values.
-  * Headroom: boosting a band pulls everything down a little so loud passages don't clip, but only by
-    about half the curve's peak (a full-scale cut made "more bass" sound quieter overall). There is no
-    limiter in PipeWire's builtin filters, so a very loud bass-heavy track at +12 can still touch 0 dBFS.
+  * Headroom: with lsp-plugins-ladspa installed, the end of the chain is a 120 Hz Linkwitz-Riley split
+    with an LSP compressor on the low band (only while bass/sub is boosted) and an LSP limiter at
+    -1 dBFS (5 ms lookahead), so boosts only pull the signal down by up to 2 dB (as on Android). Without it, the pre-cut is
+    about half the curve's peak and a very loud bass-heavy track at +12 can still touch 0 dBFS.
   * Disabling it stops the process; the default output is untouched.
 
 The band layout and the presets come from shared/eq_presets.json, the same file Android and Windows use.
@@ -99,8 +100,57 @@ def curve_peak(gains):
     return best
 
 
-def preamp(gains):
-    """Headroom: a cut of about half the curve's peak boost (0.5 dB steps)."""
+# Optional limiter as the last stage: LSP "Limiter Mono" (lsp-plugins-ladspa), one per channel.
+# With it the EQ needs only a small pre-cut (as on Android); without it, the half-peak cut above.
+LSP_SO = "/usr/lib/ladspa/lsp-plugins-ladspa.so"
+LSP_LIMITER = "http://lsp-plug.in/plugins/ladspa/limiter_mono"
+LIMITER_CONTROL = {
+    "Threshold (G)": 10 ** (-1.0 / 20),      # -1 dBFS
+    "Lookahead (ms)": 5.0,
+    "Attack time (ms)": 1.0,
+    "Release time (ms)": 20.0,               # the plugin's maximum
+    "Automatic level regulation": 0.0,
+    "Gain boost": 0.0,
+    "Input gain (G)": 1.0,
+    "Output gain (G)": 1.0,
+    "Dithering": 0.0,
+}
+
+
+# Low band (below 120 Hz, Linkwitz-Riley 4th-order split, so low + high sum back flat) gets its own
+# LSP compressor while bass is boosted: big bass hits are tamed there instead of making the final
+# limiter duck the whole mix (vocals dropping on every kick = "Rumble sounds muted").
+LSP_COMP = "http://lsp-plug.in/plugins/ladspa/compressor_mono"
+CROSSOVER_HZ = 120.0
+LOWCOMP_CONTROL = {
+    "Attack threshold (G)": 10 ** (-8.0 / 20),    # -8 dBFS
+    "Ratio": 4.0,
+    "Attack time (ms)": 5.0,
+    "Release time (ms)": 150.0,
+    "Knee (G)": 10 ** (-6.0 / 20),
+    "Sidechain lookahead (ms)": 0.0,               # no lookahead: its delay would comb the crossover
+    "Makeup gain (G)": 1.0,
+    "Input gain (G)": 1.0,
+    "Output gain (G)": 1.0,
+}
+
+
+def low_boosted(gains):
+    keys = [b["key"] for b in BANDS]
+    return any(gains[keys.index(k)] > 0 for k in ("bass", "sub") if k in keys and keys.index(k) < len(gains))
+
+
+def limiter_available():
+    return os.path.exists(LSP_SO)
+
+
+def preamp(gains, limiter=None):
+    """Headroom. With the limiter: a quarter of the curve's peak, at most 2 dB (the limiter catches the
+    rest). Without: about half the curve's peak boost. 0.5 dB steps."""
+    if limiter is None:
+        limiter = limiter_available()
+    if limiter:
+        return -min(2.0, round(0.25 * curve_peak(gains) * 2) / 2)
     return -round(HEADROOM_SHARE * curve_peak(gains) * 2) / 2
 
 
@@ -112,7 +162,25 @@ def conf_text(gains, target):
                       "control": {"Freq": float(b["freq"]), "Q": float(b["q"]), "Gain": float(g)}})
     nodes.append({"type": "builtin", "name": "subsonic", "label": "bq_highpass",
                   "control": {"Freq": subsonic_freq(gains), "Q": float(SUBSONIC["q"])}})
-    links = [{"output": f"{a['name']}:Out", "input": f"{b['name']}:In"} for a, b in zip(nodes, nodes[1:])]
+    port_in = lambda n: n["name"] + (":Input" if n["type"] == "ladspa" else ":In")
+    port_out = lambda n: n["name"] + (":Output" if n["type"] == "ladspa" else ":Out")
+    links = [{"output": port_out(a), "input": port_in(b)} for a, b in zip(nodes, nodes[1:])]
+    if limiter_available():
+        last = nodes[-1]
+        bq = lambda n, kind: {"type": "builtin", "name": n, "label": kind,
+                              "control": {"Freq": CROSSOVER_HZ, "Q": 0.7071}}
+        split = [bq("lp1", "bq_lowpass"), bq("lp2", "bq_lowpass"),
+                 {"type": "ladspa", "name": "lowcomp", "plugin": LSP_SO, "label": LSP_COMP,
+                  "control": {**LOWCOMP_CONTROL, "Bypass": 0.0 if low_boosted(gains) else 1.0}},
+                 bq("hp1", "bq_highpass"), bq("hp2", "bq_highpass"),
+                 {"type": "builtin", "name": "sum", "label": "mixer"},
+                 {"type": "ladspa", "name": "limiter", "plugin": LSP_SO, "label": LSP_LIMITER,
+                  "control": dict(LIMITER_CONTROL)}]
+        nodes += split
+        links += [{"output": port_out(last), "input": "lp1:In"}, {"output": "lp1:Out", "input": "lp2:In"},
+                  {"output": "lp2:Out", "input": "lowcomp:Input"}, {"output": "lowcomp:Output", "input": "sum:In 1"},
+                  {"output": port_out(last), "input": "hp1:In"}, {"output": "hp1:Out", "input": "hp2:In"},
+                  {"output": "hp2:Out", "input": "sum:In 2"}, {"output": "sum:Out", "input": "limiter:Input"}]
     play = {"node.name": OUT, "node.passive": True}
     cap = {"node.name": SINK, "media.class": "Audio/Sink", "filter.smart": True,
            "filter.smart.name": SMART_NAME}
@@ -121,8 +189,8 @@ def conf_text(gains, target):
     args = {
         "node.description": "Headphones EQ",
         "media.name": "Headphones EQ",
-        "filter.graph": {"nodes": nodes, "links": links, "inputs": [nodes[0]["name"] + ":In"],
-                         "outputs": [nodes[-1]["name"] + ":Out"]},
+        "filter.graph": {"nodes": nodes, "links": links, "inputs": [port_in(nodes[0])],
+                         "outputs": [port_out(nodes[-1])]},
         "audio.channels": 2,
         "audio.position": ["FL", "FR"],
         "capture.props": cap,
@@ -238,6 +306,8 @@ class Eq:
                 saved = json.load(f)
             self.s.update({k: saved[k] for k in self.s if k in saved})
             self.s["gains"] = clamp_gains(self.s["gains"])
+            if self.s["preset"] in PRESETS:       # a named preset means the model's current values
+                self.s["gains"] = clamp_gains(PRESETS[self.s["preset"]]["gains"])
         except (OSError, ValueError):
             pass
 
@@ -256,6 +326,7 @@ class Eq:
         return {**self.s, "running": self.running(), "available": self.available(), "error": self.error,
                 "into": self.config.get("eq_target") or into, "headroom_db": preamp(self.s["gains"]),
                 "bands": BANDS, "presets": MODEL["presets"], "gain_min": GMIN, "gain_max": GMAX,
+                "limiter": limiter_available(),
                 "subsonic_hz": subsonic_freq(self.s["gains"]) if subsonic_freq(self.s["gains"]) > HP_OFF else 0}
 
     def running(self):
@@ -299,6 +370,8 @@ class Eq:
         params = [f'"pre:Gain" {preamp(self.s["gains"])}']
         params += [f'"{b["key"]}:Gain" {g}' for b, g in zip(BANDS, self.s["gains"])]
         params.append(f'"subsonic:Freq" {subsonic_freq(self.s["gains"])}')
+        if limiter_available():
+            params.append(f'"lowcomp:Bypass" {0.0 if low_boosted(self.s["gains"]) else 1.0}')
         try:
             r = _run(["pw-cli", "set-param", str(nid), "Props", "{ params = [ " + " ".join(params) + " ] }"])
         except Exception:

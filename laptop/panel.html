@@ -156,7 +156,7 @@ function renderEq(){if(!EQ)return;$('eqcard').className=EQ.available?'':'off';
  $('eq_on').className='sw'+(EQ.enabled?' on':'');
  $('eq_presets').innerHTML=EQ.presets.map(p=>`<button class="${EQ.preset==p.key?'on':''}" onclick="eqset({preset:'${p.key}',enabled:true})">${p.label}</button>`).join('')+
   `<button class="${EQ.preset=='custom'?'on':''}" disabled>Custom</button>`;
- $('eq_where').textContent=EQ.enabled?(EQ.running?'in front of '+(EQ.into||'the default output')+(EQ.headroom_db?` · headroom ${EQ.headroom_db} dB`:'')+(EQ.subsonic_hz?` · cut below ${EQ.subsonic_hz} Hz`:''):'waiting for the headphones'):'off';
+ $('eq_where').textContent=EQ.enabled?(EQ.running?'in front of '+(EQ.into||'the default output')+(EQ.headroom_db?` · headroom ${EQ.headroom_db} dB`:'')+(EQ.subsonic_hz?` · cut below ${EQ.subsonic_hz} Hz`:'')+(EQ.limiter?' · limiter at -1 dBFS':''):'waiting for the headphones'):'off';
  $('eq_note').textContent=EQ.error?('EQ: '+EQ.error):"Drag the dots up or down. AirPods have no EQ of their own, so it's applied to the audio before it's sent.";
  drawEq();}
 function sw(id,v){const e=$(id);e.className='sw'+(v===true?' on':'')+(v==null?' na':'');}
