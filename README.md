@@ -8,6 +8,10 @@ from a radial flick menu on both computers, from a web panel, and from a home-sc
 It also has a shared 5-band EQ with a draggable curve, the AirPods' adaptive noise level and settings,
 and the Crusher's extra settings (see [Customizing the sound](#customizing-the-sound)).
 
+Two things are optional and off by default: **spatial audio** (Linux laptop only, with experimental head
+tracking) and the **laptop mic tools** (a sound viewer and notch filters). Nothing here ever switches the
+headset to call (HFP) mode, so audio quality stays the same while you use the controls.
+
 It doesn't need an iPhone, a kernel driver, a Secure Boot change, a USB dongle or a rooted phone.
 
 <p align="center">
@@ -30,12 +34,33 @@ Crusher gets Bass, and with nothing connected only volume and track controls are
 |---|---|---|
 | <img src="docs/images/ring-audio-both.png" width="260"> | <img src="docs/images/ring-airpods-only.png" width="260"> | <img src="docs/images/ring-crusher-only.png" width="260"> |
 
+### The web panel
+
+The panel is one page served by the laptop (`laptop/panel.html`). It is shown here on a phone-width screen
+with example data, in two parts: the headphone controls first, then EQ, spatial audio and the laptop mic tools.
+
 <p align="center">
-  <img src="docs/images/panel.png" width="360" alt="The web panel">
+  <img src="docs/images/panel-phone-1.png" width="360" alt="Web panel, top half: Crusher ANC 2 listening mode, sensory bass and extras; AirPods Pro noise control, Block noise slider (Block more to Hear more, with Block max / Balanced / Hear more / Full ANC), AirPods settings and press-and-hold modes">
   &nbsp;&nbsp;
+  <img src="docs/images/panel-phone-2.png" width="360" alt="Web panel, bottom half: the equalizer with its draggable 5-band curve and presets, optional spatial audio (Off / Fixed / Head tracked), and the optional laptop mic tools">
+</p>
+
+- **Block noise (AirPods).** The slider runs from *Block more* to *Hear more* and sets the Adaptive level.
+  The buttons are shortcuts: *Block max*, *Balanced*, *Hear more* (all Adaptive at different levels) and
+  *Full ANC*. The AirPods' own microphones do the listening, so it works with nothing playing through the laptop.
+- **Equalizer.** One volume, with automatic headroom so boosts don't clip. On the laptop it is a PipeWire
+  smart filter in front of the current output.
+- **Spatial audio** is Linux only and optional. Head tracking is experimental.
+- **Laptop mic tools** is optional. It uses the laptop's microphone, not the AirPods, to find a hum or whine and
+  notch it out of sound that goes through the laptop.
+- **Crusher extras** show hear-through on calls and when paused, plus the firmware's feature flags (read-only).
+
+### The Android widget
+
+<p align="center">
   <img src="docs/images/widget-mockup.png" width="360" alt="The Android widget (mockup of the real layout)">
 </p>
-<p align="center"><sub>Web panel (left) and the home-screen widget (right; a mockup of its real layout)</sub></p>
+<p align="center"><sub>The home-screen widget (a mockup of its real layout)</sub></p>
 
 ## The interesting parts
 
@@ -81,22 +106,32 @@ this broadcast, so battery shows no matter which device is playing.
 | Control | AirPods Pro 2 | Crusher ANC 2 | Where |
 |---|---|---|---|
 | **EQ** (5 bands, presets Flat / Bass boost / Vocal / Treble / Custom, draggable curve) | Applied to the audio before it's sent, since AirPods have no EQ over AAP | Same, on top of its sensory bass | Panel (laptop output), Android app and widget (phone output), Windows (Equalizer APO), ring "EQ" wedge |
-| Adaptive noise level, "Less noise ↔ More noise" | AAP `0x2E` | | Panel, Android app |
+| Adaptive noise level, shown as the Block noise slider (Block more ↔ Hear more) and the Block max / Balanced / Hear more / Full ANC shortcuts | AAP `0x2E` | | Panel, Android app |
 | Conversational Awareness, Personalized Volume, ear detection, one-bud ANC, "Off" in press and hold | AAP `0x28`, `0x26`, `0x0A`, `0x1B`, `0x34` | | Panel, Android app |
 | Press-and-hold cycle (which modes) | AAP `0x1A` | | Panel, Android app |
 | Sensory bass level and on/off | | `AT.CRUSHER` | Panel, Android app, `crusher_win.py`, ring |
 | Transparency level, hear-through on calls / when paused | | `AT.UIAUDIO=transparency,,n`, `atoncall`, `atonpause` (shown only if the firmware answers) | Panel, Android app, `crusher_win.py` |
+| Firmware feature flags (Tile Find Me, Spotify One Touch, Remote Control, Latency Mode) | | `AT.FEATURE=info`, read-only | Panel |
 
 Every setting is read back from the device, so the controls show what the headphones report.
 
 **The EQ is source-side.** It runs on whichever device is playing:
-- **Laptop:** a PipeWire filter-chain sink (`laptop/hp_eq.py`).
-- **Phone:** Android `audiofx`, with no root. It tries the global output, which is deprecated and only
+- **Laptop:** a PipeWire smart filter in front of the current output (`laptop/hp_eq.py`), with one volume
+  and automatic headroom so boosts don't clip.
+- **Phone:** Android `audiofx`, with no root. What it can do depends on the phone's audio effects. It tries the global output, which is deprecated and only
   works if the phone honours it, and also attaches to music apps that offer their audio session to
   external EQs. The app says which of these it got. Apps that do neither (most video apps and browsers)
   can't be equalized without root.
-- **Windows:** [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) config, written by
+- **Windows:** needs [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) config, written by
   `windows/eq_apo.py`. Equalizer APO itself has to be installed.
+
+**Optional extras (laptop only).** Spatial audio plays stereo as two virtual speakers in front of you
+(HRTF, `laptop/hp_spatial.py`); head tracking uses the AirPods' motion sensors and is experimental. The laptop
+mic tools (`laptop/hp_sound.py`) show what the laptop microphone hears and can notch a hum or whine out of the
+mic or out of the laptop's output. Both are off until you turn them on.
+
+**Android 1.2.0** adds *Smart adaptive* (off by default): it uses the phone's activity recognition to move
+the AirPods between Adaptive levels as you walk, drive or sit still.
 
 All three use `shared/eq_presets.json`, so a preset sounds the same everywhere.
 
@@ -198,8 +233,8 @@ The APK has nothing about any particular device built in.
 ## Build notes
 
 Built in one night (about 5.5 hours) across three devices and two headsets. Seven routes were tried
-for AirPods on Windows before the two-device relay worked. The whole thing is about 1,250 lines of
-code, and none of it needs root, a driver or a Secure Boot change.
+for AirPods on Windows before the two-device relay worked. The whole thing is now about 5,000 lines of
+code (roughly 2,500 Python, 2,200 Kotlin and a 290-line web panel page), and none of it needs root, a driver or a Secure Boot change.
 
 <p align="center"><img src="docs/images/by-the-numbers.png" width="760" alt="By the numbers"></p>
 
