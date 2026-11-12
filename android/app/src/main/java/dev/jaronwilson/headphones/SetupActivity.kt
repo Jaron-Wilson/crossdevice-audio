@@ -47,6 +47,8 @@ class SetupActivity : Activity() {
     private val io = Executors.newSingleThreadExecutor()
     private var binding = false                       // true while we set controls from state (no echo)
     private lateinit var eqOn: Switch
+    private lateinit var eqRumble: Switch
+    private lateinit var crRumble: Switch
     private lateinit var eqCurve: EqCurveView
     private lateinit var eqPresets: LinearLayout
     private lateinit var eqStatus: TextView
@@ -155,6 +157,9 @@ class SetupActivity : Activity() {
         val eq = card()
         eqOn = switch("Equalizer") { on -> EqModel.setEnabled(this, on); EqService.update(this); refreshEq(); HeadphonesWidget.redraw(this) }
         eq.addView(eqOn)
+        eqRumble = switch("Rumble (sub-bass for any headphones)") { on ->
+            EqModel.setRumble(this, on); EqService.update(this); refreshEq(); HeadphonesWidget.redraw(this) }
+        eq.addView(eqRumble)
         eqPresets = LinearLayout(this)
         eq.addView(HorizontalScrollView(this).apply { addView(eqPresets); isHorizontalScrollBarEnabled = false }, lp(4))
         eqCurve = EqCurveView(this, onChange = { g ->
@@ -241,6 +246,8 @@ class SetupActivity : Activity() {
         val cr = card()
         crBassOn = switch("Sensory bass (haptic) on") { on -> setCr("bass_on", on) }
         cr.addView(crBassOn)
+        crRumble = switch("Rumble (Sensory Bass max; off puts your level back)") { on -> crRumble(on) }
+        cr.addView(crRumble)
         for ((k, t) in listOf("at_on_call" to "Hear-through on calls", "at_on_pause" to "Hear-through when paused"))
             crSwitches[k] = switch(t) { on -> setCr(k, on) }.also { cr.addView(it) }
         crFeat = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(6), 0, 0) }
@@ -355,6 +362,7 @@ class SetupActivity : Activity() {
     private fun refreshEq() {
         binding = true
         eqOn.isChecked = EqModel.enabled(this)
+        eqRumble.isChecked = EqModel.rumbleOn(this)
         binding = false
         eqCurve.active = EqModel.enabled(this)
         eqCurve.gains = EqModel.gains(this).toMutableList()
@@ -415,6 +423,7 @@ class SetupActivity : Activity() {
         if (cr != null) {
             crBassOn.visibility = if (cr.has("bass_on")) View.VISIBLE else View.GONE
             crBassOn.isChecked = cr.optBoolean("bass_on")
+            crRumble.isChecked = CrusherDirect.rumbleOn(this) || cr.optJSONObject("rumble")?.optBoolean("crusher") == true
             val x = cr.optJSONObject("extras") ?: JSONObject()
             // no transparency level / ANC strength on this firmware (those commands answer ERROR)
             crFeat.text = x.optJSONArray("features")?.let { a ->
@@ -501,6 +510,18 @@ class SetupActivity : Activity() {
             if (!Handoff.local(app)) { toast("Only works while the AirPods are on this phone"); return@execute }
             val r = runCatching { PhoneDirect.readBack(app) }
             toast(if (r.isSuccess) "Read back from the AirPods" else "AirPods: ${r.exceptionOrNull()?.message}")
+            loadControls()
+        }
+    }
+
+    private fun crRumble(on: Boolean) {
+        val app = applicationContext
+        io.execute {
+            val r = runCatching {
+                if (CrusherDirect.connected(app)) CrusherDirect.setRumble(app, on)
+                else HeadphonesWidget.post(app, "/api/rumble", JSONObject().put("device", "crusher").put("on", on).toString())
+            }
+            r.exceptionOrNull()?.let { toast("Crusher: ${it.message}") }
             loadControls()
         }
     }

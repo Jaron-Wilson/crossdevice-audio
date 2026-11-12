@@ -19,7 +19,7 @@ import kotlin.math.sqrt
 
 /**
  * The shared EQ model (assets/eq_presets.json = shared/eq_presets.json in the repo, the same file the
- * laptop panel and Windows use): five bands, presets, and the user's current choice.
+ * laptop panel and Windows use): six bands (the "sub" band is stored last), presets, and the user's current choice.
  *
  * The curve is drawn from the real filter math (RBJ biquads), so what you see is the response the
  * laptop's PipeWire filter and Equalizer APO produce. On the phone the audiofx effects can't run
@@ -32,7 +32,14 @@ object EqModel {
     @Volatile private var loaded: JSONObject? = null
 
     private fun model(c: Context): JSONObject = loaded ?: JSONObject(
-        c.assets.open("eq_presets.json").bufferedReader().use { it.readText() }).also { loaded = it }
+        c.assets.open("eq_presets.json").bufferedReader().use { it.readText() }).also { m ->
+            loaded = m
+            m.optJSONObject("subsonic")?.let { subsonicHz = it.optDouble("freq", 25.0); subsonicQ = it.optDouble("q", 0.707) }
+        }
+
+    /** High-pass under the "sub" band, used only while that band is boosted (as on the laptop). */
+    @Volatile var subsonicHz = 25.0
+    @Volatile var subsonicQ = 0.707
 
     fun bands(c: Context): List<Band> = model(c).getJSONArray("bands").let { a ->
         (0 until a.length()).map { i -> a.getJSONObject(i).let {
@@ -83,6 +90,26 @@ object EqModel {
         p(c).edit().putString("preset", match).putString("gains", JSONArray(cg).toString()).apply()
     }
 
+    // ---- Rumble: the "rumble" preset, and back to whatever was set before ----
+    fun rumbleOn(c: Context) = enabled(c) && preset(c) == "rumble"
+
+    fun setRumble(c: Context, on: Boolean) {
+        val pr = p(c)
+        if (on) {
+            if (!rumbleOn(c)) pr.edit().putString("rumble_prev", JSONObject()
+                .put("enabled", enabled(c)).put("preset", preset(c)).put("gains", JSONArray(gains(c))).toString()).apply()
+            setPreset(c, "rumble")
+        } else {
+            val prev = runCatching { JSONObject(pr.getString("rumble_prev", null) ?: "") }.getOrNull()
+            pr.edit().remove("rumble_prev").apply()
+            if (prev == null) { setPreset(c, "flat"); return }
+            val key = prev.optString("preset", "flat")
+            if (key != "custom" && key != "rumble" && presets(c).any { it.key == key }) setPreset(c, key)
+            else prev.optJSONArray("gains")?.let { a -> setGains(c, (0 until a.length()).map { a.getDouble(it) }) }
+            setEnabled(c, prev.optBoolean("enabled", true))
+        }
+    }
+
     /** Next preset (Flat -> Bass boost -> Vocal -> Treble -> Flat), turning the EQ on. */
     fun cycle(c: Context): String {
         val keys = presets(c).map { it.key }
@@ -116,6 +143,7 @@ object EqModel {
         val r = 2 * sqrt(a) * al
         return when (type) {
             "peaking" -> doubleArrayOf(1 + al * a, -2 * c, 1 - al * a, 1 + al / a, -2 * c, 1 - al / a)
+            "highpass" -> doubleArrayOf((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al)
             "lowshelf" -> doubleArrayOf(a * ((a + 1) - (a - 1) * c + r), 2 * a * ((a - 1) - (a + 1) * c),
                 a * ((a + 1) - (a - 1) * c - r), (a + 1) + (a - 1) * c + r, -2 * ((a - 1) + (a + 1) * c), (a + 1) + (a - 1) * c - r)
             else -> doubleArrayOf(a * ((a + 1) + (a - 1) * c + r), -2 * a * ((a - 1) + (a + 1) * c),
@@ -123,14 +151,16 @@ object EqModel {
         }
     }
 
-    /** Response in dB at [freq] for these bands and gains (without the preamp). */
+    /** Response in dB at [freq] for these bands and gains (without the preamp), including the
+     *  subsonic high-pass while the "sub" band is boosted. */
     fun responseDb(bands: List<Band>, gains: List<Double>, freq: Double): Double {
         val w = 2 * PI * freq / FS
         var db = 0.0
-        for ((i, b) in bands.withIndex()) {
-            val g = gains.getOrElse(i) { 0.0 }
-            if (abs(g) < 1e-6) continue
-            val k = coef(b.type, b.freq, b.q, g)
+        val stages = bands.withIndex().filter { abs(gains.getOrElse(it.index) { 0.0 }) >= 1e-6 }
+            .map { coef(it.value.type, it.value.freq, it.value.q, gains[it.index]) }.toMutableList()
+        val sub = bands.indexOfFirst { it.key == "sub" }
+        if (sub >= 0 && gains.getOrElse(sub) { 0.0 } > 0) stages += coef("highpass", subsonicHz, subsonicQ, 0.0)
+        for (k in stages) {
             val nr = k[0] + k[1] * cos(w) + k[2] * cos(2 * w); val ni = -(k[1] * sin(w) + k[2] * sin(2 * w))
             val dr = k[3] + k[4] * cos(w) + k[5] * cos(2 * w); val di = -(k[4] * sin(w) + k[5] * sin(2 * w))
             db += 10 * log10((nr * nr + ni * ni) / (dr * dr + di * di))

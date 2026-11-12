@@ -634,7 +634,7 @@ class H(BaseHTTPRequestHandler):
             return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online,
                                            "eq":bool(EQ and EQ.available())}))
         if self.path=="/api/state":
-            return self._s(200,json.dumps({"crusher":crusher_state(),"airpods":AP.state(),"eq":eq_state(),
+            return self._s(200,json.dumps({"crusher":{**crusher_state(),"rumble":rumble_state()},"airpods":AP.state(),"eq":eq_state(),
                                            "spatial":spatial_state(),"rumble":rumble_state()}))
         if self.path=="/api/spatial":
             return self._s(200,json.dumps(spatial_state()))

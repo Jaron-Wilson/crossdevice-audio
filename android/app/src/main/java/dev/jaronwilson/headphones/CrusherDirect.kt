@@ -154,7 +154,8 @@ object CrusherDirect {
     /** Set "bass_on", "at_on_call" or "at_on_pause" (Boolean). */
     fun setSetting(context: Context, name: String, value: Any) {
         val cmd = when (name) {
-            "bass_on" -> "AT.CRUSHER=state," + (if (value == true) "on" else "off")
+            // Skull-iQ's CRUSHER_SET_STATE is "AT.CRUSHER=" + on|off ("AT.CRUSHER=state,on" answers ERROR)
+            "bass_on" -> "AT.CRUSHER=" + (if (value == true) "on" else "off")
             "at_on_call" -> "AT.UIAUDIO=atoncall," + (if (value == true) "on" else "off")
             "at_on_pause" -> "AT.UIAUDIO=atonpause," + (if (value == true) "on" else "off")
             else -> error("Unknown Crusher setting $name")
@@ -173,6 +174,32 @@ object CrusherDirect {
             else -> error("Unknown Crusher mode $mode")
         }
         session(context, cmds, read = false)
+    }
+
+    /** Rumble: Sensory Bass on at 10. Off puts back the level and on/off state from before. */
+    fun rumbleOn(context: Context) = rumblePrefs(context).contains("prev")
+
+    private fun rumblePrefs(context: Context) = context.getSharedPreferences("rumble", Context.MODE_PRIVATE)
+
+    fun setRumble(context: Context, on: Boolean) {
+        val p = rumblePrefs(context)
+        if (on) {
+            if (!p.contains("prev")) {
+                val s = state(context) ?: error("Crusher not connected to this phone")
+                if (!s.optBoolean("online")) error("Crusher not answering")
+                p.edit().putString("prev", JSONObject().put("bass_on", s.opt("bass_on")).put("bass", s.opt("bass")).toString()).apply()
+            }
+            val r = sessionEach(context, listOf("AT.CRUSHER=on", "AT.CRUSHER=level,10"), read = true)
+            if (r.any { !answered(it) }) error("Crusher refused Rumble")
+        } else {
+            val prev = runCatching { JSONObject(p.getString("prev", null) ?: "") }.getOrNull()
+            p.edit().remove("prev").apply()
+            if (prev == null) return                       // nothing saved: leave it as it is
+            val cmds = mutableListOf<String>()
+            if (prev.has("bass")) cmds += "AT.CRUSHER=level,${prev.optInt("bass", 5).coerceIn(0, 10)}"
+            if (prev.opt("bass_on") == false) cmds += "AT.CRUSHER=off"
+            if (cmds.isNotEmpty()) session(context, cmds, read = false)
+        }
     }
 
     /** Set sensory-bass level, 0-10. */
