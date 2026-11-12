@@ -170,6 +170,50 @@ How the audio is routed:
   stops the app from translating its own voice. It is half-duplex: speech that overlaps playback is missed.
 - Call audio over Bluetooth SCO is narrowband or wideband, so translations in the AirPods sound like a phone call.
 
+## Last seen and Find (Android 1.4.0)
+
+Where did I leave them? The app answers with only your own devices: no Apple Find My network, no Google Find
+Hub, no account, no API key and no upload. Open it from the app's **Last seen and Find** button or the widget's
+"last seen" line.
+
+- **Last seen.** When the AirPods or the Crusher disconnect from the phone, the app saves the time, the last
+  battery levels, where the buds were (in the case, in ears, one out) and, if you allow it, the phone's
+  location. When the app's Bluetooth scans hear your AirPods it also saves "seen nearby" (at most once every
+  5 minutes, with the signal strength), and "last heard here" when they go quiet. The last 50 events per
+  device are kept in the app's private storage. **Clear history** deletes them (and the laptop's log, if set up).
+- **Map.** OpenStreetMap through [osmdroid](https://github.com/osmdroid/osmdroid): no key, and tiles you have
+  looked at stay cached on the phone for offline use. A pin, the time, "Disconnected here", the history list
+  and a **Navigate** button (opens your maps app with a `geo:` link).
+- **Hotter / colder.** A screen that scans Bluetooth LE at full speed only while it is open, smooths the signal
+  (a small Kalman filter), and shows a ring, Hot / Warm / Cold, a rough distance and a buzz that speeds up as you
+  get closer. The case and a bud that is out of the case are shown separately.
+- **Laptop.** The panel logs when the AirPods and the Crusher connect to and disconnect from the laptop (no GPS
+  there, so it is "at the laptop" plus the time). Over Tailscale the app shows "last connected to the laptop at 3:12 PM".
+- **Widget.** A small "AirPods last seen 2:41 PM" line; tap it for the map.
+
+**Telling your AirPods apart.** AirPods broadcast from a random address that changes about every 15 minutes.
+While they are connected to the phone, the app asks them over its own AAP link for their identity key (IRK)
+and keeps it on the phone. With the key, an advert is matched exactly (Bluetooth's standard address
+resolution). Without it the app guesses: same model and colour as yours and battery levels like yours. Another
+set of the same AirPods nearby could then be mistaken for yours, and the finder says so. The IRK request
+follows LibrePods and hasn't been confirmed on every firmware.
+
+**Limits, honestly.**
+- AirPods in a **closed case** mostly stop broadcasting, so the finder can't hear them until the lid opens or a
+  bud comes out. Range is roughly 10-30 m, and the distance is a rough guess.
+- **No "play sound".** Apple only offers it through Find My, and LibrePods documents no AAP command for it, so
+  the app doesn't have one.
+- **Crusher:** it is a classic Bluetooth headset. The finder only hears it if it sends a Bluetooth LE broadcast
+  with its name or its Bluetooth address; otherwise you only get its disconnect time and place.
+- **Location at disconnect time.** With "while using the app", Android usually refuses a location while the
+  app is closed. The app tries a few seconds of foreground location; if Android says no, only the time and
+  battery are saved. For the spot every time, choose "Allow all the time" (optional). The app asks for one
+  fix per disconnect and never tracks you in between.
+
+**Permissions it asks for, and why:** *Location* (precise, optional, asked on the Last seen screen) for the
+spot where they disconnected. *Location all the time* (optional, separate) so that works while the app is
+closed. *Nearby devices* (already used for the widget) for the scans. *Vibrate* for the finder's buzz.
+
 ## How it fits together
 
 ```mermaid
@@ -215,7 +259,7 @@ flowchart LR
 | `laptop/apple-did.sh` | Switches BlueZ to Apple's Device ID (and back with `undo`). |
 | `windows/crusher_win.py` | Crusher control on Windows with no driver: RFCOMM through Winsock `AF_BTH` via ctypes. |
 | `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, and the Windows connection check. |
-| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`). |
+| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Last seen and Find (`Tracker.kt`, `TrackActivity.kt`, `FinderActivity.kt`, the testable parts in `TrackLogic.kt`) and Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`). |
 | `docs/HOW-IT-WORKS.md` | The multi-device findings, with the packets that prove them. |
 | `docs/PROTOCOL.md` | The Crusher AT commands, the AAP packets, the BLE battery format and the panel API. |
 

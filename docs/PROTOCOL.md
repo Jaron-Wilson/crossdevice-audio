@@ -101,6 +101,28 @@ Apple manufacturer data `0x004C`, first byte `0x07`. As a hex string `h` of that
 - flipped = `int(h[10],16) & 0x02 == 0`
 - left = `h[12]` if flipped else `h[13]`; right = the other one; case = `h[15]` (each × 10 %, `f` = unknown)
 - charging flags = `h[14]`: case `0b100`; left/right `0b01`/`0b10` (swapped when flipped)
+- status byte (`h[10:12]`, byte 5), as LibrePods' Linux code reads it: bit 6 = the bud sending this advert is
+  in the case, bit 4 = one bud in the case, bit 2 = both in the case, bit 5 = left bud is primary; in-ear bits
+  1 and 3 (which is which depends on bits 5 and 6). The Android finder uses bits 6/4/2 to split "case" from
+  "bud out of the case". Byte 9 is the colour.
+- The advert comes from a **resolvable private address** that changes about every 15 minutes. The phone app
+  resolves it with the AirPods' IRK (below); without the IRK it can only guess (same model, colour and
+  similar battery levels).
+
+### Proximity keys over AAP (Android Last seen / finder)
+
+Sent on the phone's own AAP link, format from LibrePods (`AACPManager`): request
+`04 00 04 00 30 00 <types> 00` (`01` = IRK, `04` = encryption key; the app asks only for `01`, at most once an
+hour until it has it). Reply `04 00 04 00 31 00 <count>` then per key `<type> 00 <len> 00 <key bytes>`. The
+16-byte IRK is least-significant byte first; an address resolves when `ah(IRK, prand) == hash` (Bluetooth Core
+spec, Vol 3 Part H), with `prand` = the top three address bytes and `hash` = the bottom three. The key stays
+in the app's private storage.
+
+AirPods battery over AAP: `04 00 04 00 04 00 <count>` then per component `<type> 01 <level> <status> 01`
+(type 2 left, 4 right, 8 case; status 1 discharging, 2 charging, 4 not connected).
+
+No "play a sound" command is documented by LibrePods (its README lists it as planned, not done), so the app
+doesn't send one.
 
 ## Panel HTTP API (laptop, 127.0.0.1:8970, published over Tailscale)
 
@@ -124,6 +146,8 @@ Apple manufacturer data `0x004C`, first byte `0x07`. As a hex string `h` of that
 | POST | `/api/crusher/mode` | `anc\|transparency\|off` | |
 | POST | `/api/crusher/bass` | `0-10` | |
 | POST | `/api/handoff` | `phone\|laptop` | Who has the AirPods. The laptop steps aside for the phone |
+| GET | `/api/track` | | Last seen on the laptop: `{airpods:{connected, last_connected, events:[{t, event:connected\|disconnected, where:"laptop"}]}, crusher:{…}}`. Times are Unix seconds. Polled from BlueZ every 30 s, last 50 per device, stored in `~/.local/state/headphone-panel/track.json` |
+| POST | `/api/track/clear` | | Clears that log |
 
 ## Sound viewer and "block that sound" (laptop panel)
 

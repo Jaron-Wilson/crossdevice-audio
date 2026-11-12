@@ -137,6 +137,9 @@ object PhoneDirect {
                     while (true) {
                         val n = sock.inputStream.read(buf)
                         if (n <= 0) break
+                        // Last seen / finder: the battery packet and the IRK reply (see Tracker)
+                        AapTrack.batteryFrom(buf, n)?.let { Tracker.rememberBattery(context, Tracker.AIRPODS, it) }
+                        AapTrack.irkFrom(buf, n)?.let { Tracker.rememberIrk(context, it) }
                         for (i in 0..n - 8) {
                             if (buf[i] == 0x04.toByte() && buf[i + 1] == 0.toByte() && buf[i + 2] == 0x04.toByte() &&
                                 buf[i + 3] == 0.toByte() && buf[i + 4] == 0x09.toByte() && buf[i + 5] == 0.toByte()) {
@@ -151,6 +154,8 @@ object PhoneDirect {
             out.write(HANDSHAKE); out.flush(); Thread.sleep(250)
             out.write(FEATURES); out.flush(); Thread.sleep(150)
             out.write(NOTIFY); out.flush()
+            // Ask once for the key that resolves the AirPods' rotating BLE address (local only, see Tracker)
+            if (Tracker.wantIrk(context)) { Thread.sleep(150); out.write(AapTrack.REQUEST_IRK); out.flush() }
             if (setTo != null) {
                 Thread.sleep(150)
                 out.write(hex("0400040009000D") + byteArrayOf(MODE.getValue(setTo).toByte(), 0, 0, 0)); out.flush()
@@ -287,13 +292,14 @@ object PhoneDirect {
     fun scanBattery(context: Context, millis: Long = 4000): JSONObject? {
         val scanner = context.getSystemService(BluetoothManager::class.java)?.adapter?.bluetoothLeScanner ?: return null
         var best: Pair<Int, ByteArray>? = null
+        var bestAddr = ""
         val done = CountDownLatch(1)
         val cb = object : ScanCallback() {
             override fun onScanResult(type: Int, r: ScanResult) {
                 val m = r.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
                 // any AirPods "proximity pairing" broadcast; the strongest (closest) one wins
                 if (m.size >= 8 && m[0] == 0x07.toByte()) {
-                    if (best == null || r.rssi > best!!.first) best = r.rssi to m
+                    if (best == null || r.rssi > best!!.first) { best = r.rssi to m; bestAddr = r.device.address }
                 }
             }
         }
@@ -306,6 +312,12 @@ object PhoneDirect {
             return null
         } finally {
             runCatching { scanner.stopScan(cb) }
+        }
+        // Last seen: the strongest advert while the AirPods are on this phone teaches the app their model
+        best?.let { (rssi, m) ->
+            ProxAdvert.parse(m)?.let { ad ->
+                runCatching { Tracker.onAdvert(context, bestAddr, rssi, ad, learnIt = Handoff.local(context) && rssi > -70) }
+            }
         }
         return best?.second?.let { decode(it) }
     }

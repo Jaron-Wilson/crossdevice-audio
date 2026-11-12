@@ -54,4 +54,9 @@
         <TextView android:id="@+id/eq_btn" style="@style/Btn" android:text="EQ" />
         <TextView android:id="@+id/tr_btn" style="@style/Btn" android:text="Translate" />
     </LinearLayout>
+
+    <TextView android:id="@+id/seen" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:maxLines="1" android:ellipsize="end"
+        android:paddingTop="4dp" android:textColor="#8AA6B4" android:textSize="11sp"
+        android:visibility="gone" android:text="Last seen" />
 </LinearLayout>

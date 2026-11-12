@@ -452,6 +452,60 @@ class AirPods(threading.Thread):
 
 AP = AirPods(); AP.start()
 
+# ---- Last seen on this laptop: when the AirPods / Crusher Bluetooth link to the laptop came and went.
+# The laptop has no GPS, so an event is just "at the laptop" + time. Kept locally (last 50 per device),
+# served at GET /api/track for the phone app, cleared with POST /api/track/clear. Nothing is sent anywhere.
+TRACK_FILE = os.path.expanduser("~/.local/state/headphone-panel/track.json")
+TRACK_LOCK = threading.Lock()
+def _bt_connected(mac):
+    if not mac: return None
+    try:
+        out = subprocess.run(["bluetoothctl", "info", mac], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    return "Connected: yes" in out
+def track_load():
+    try:
+        with open(TRACK_FILE) as f: d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    for k in ("airpods", "crusher"):
+        d.setdefault(k, {"connected": False, "last_connected": None, "events": []})
+    return d
+TRACK = track_load()
+def track_save():
+    os.makedirs(os.path.dirname(TRACK_FILE), exist_ok=True)
+    tmp = TRACK_FILE + ".tmp"
+    with open(tmp, "w") as f: json.dump(TRACK, f)
+    os.replace(tmp, TRACK_FILE)
+def track_tick(now=None):
+    """One poll: log a connect/disconnect when a link changed since the last poll."""
+    now = now or time.time(); changed = False
+    for dev, mac in (("airpods", AP_MAC), ("crusher", CR_MAC)):
+        c = _bt_connected(mac)
+        if c is None: continue
+        with TRACK_LOCK:
+            d = TRACK[dev]
+            if c: d["last_connected"] = now
+            if c != d["connected"]:
+                d["connected"] = c
+                d["events"] = (d["events"] + [{"t": now, "event": "connected" if c else "disconnected", "where": "laptop"}])[-50:]
+                changed = True
+    if changed:
+        with TRACK_LOCK: track_save()
+def track_loop():
+    while True:
+        try: track_tick()
+        except Exception as e: print("track:", repr(e), flush=True)
+        time.sleep(30)
+threading.Thread(target=track_loop, daemon=True).start()
+def track_state():
+    with TRACK_LOCK: return json.loads(json.dumps(TRACK))
+def track_clear():
+    with TRACK_LOCK:
+        for d in TRACK.values(): d["events"] = []; d["last_connected"] = time.time() if d["connected"] else None
+        track_save()
+
 # ---- Source-side EQ (PipeWire filter-chain), see hp_eq.py ----
 try:
     import hp_eq
@@ -638,6 +692,8 @@ class H(BaseHTTPRequestHandler):
                                            "spatial":spatial_state(),"rumble":rumble_state()}))
         if self.path=="/api/spatial":
             return self._s(200,json.dumps(spatial_state()))
+        if self.path=="/api/track":
+            return self._s(200,json.dumps(track_state()))
         if self.path=="/api/eq":
             return self._s(200,json.dumps(eq_state()))
         self._s(404,"{}")
@@ -665,6 +721,8 @@ class H(BaseHTTPRequestHandler):
                 ok,echoed=AP.set_setting(j["name"], j.get("value"))
                 if not ok: return self._s(503,json.dumps({"error":"AirPods not connected"}))
                 return self._s(200,json.dumps({"echoed":echoed,"settings":AP.settings(),"reported":AP.reported()}))
+            if self.path=="/api/track/clear":
+                track_clear(); return self._s(200,json.dumps(track_state()))
             if self.path=="/api/airpods/refresh":
                 return self._s(200 if AP.refresh() else 503,json.dumps({"reported":AP.reported()}))
             if self.path=="/api/crusher/setting":

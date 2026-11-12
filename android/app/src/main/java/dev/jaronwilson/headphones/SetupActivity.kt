@@ -552,6 +552,13 @@ class SetupActivity : Activity() {
             }
             setOnClickListener { startActivity(Intent(this@SetupActivity, TranslateActivity::class.java)) }
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(72)).apply { bottomMargin = dp(6) })
+        col.addView(Button(this).apply {
+            text = "Last seen and Find"; isAllCaps = false; textSize = 18f; setTextColor(Color.WHITE)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#2B5C8A")); cornerRadius = dp(16).toFloat()
+            }
+            setOnClickListener { startActivity(Intent(this@SetupActivity, TrackActivity::class.java)) }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, dp(60)).apply { bottomMargin = dp(6) })
         buildControls(col)
         col.addView(label("Setup", 15f, "#E8EDF2"))
         col.addView(label("Control your AirPods noise modes and see their battery from a home-screen widget. " +

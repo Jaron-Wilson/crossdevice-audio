@@ -20,6 +20,15 @@
     <!-- Live Translation: the AirPods' mics (only while you have it on), as a microphone foreground service -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Last seen (optional, asked on the Last seen screen): the phone's location when headphones disconnect,
+         stored on the phone only. Background location only if you choose "Allow all the time". -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- the finder's "closer = faster" buzz; the map's tile cache checks for a network -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- package visibility: the phone's speech recognizer and text-to-speech engine -->
     <queries>
@@ -49,6 +58,28 @@
             android:exported="false"
             android:launchMode="singleTop"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Last seen: map, history, permissions -->
+        <activity
+            android:name=".TrackActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Hotter / colder finder (scans only while open) -->
+        <activity
+            android:name=".FinderActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- A few seconds of location right after a disconnect, then it stops itself -->
+        <service
+            android:name=".LocateService"
+            android:exported="false"
+            android:foregroundServiceType="location|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Saves when headphones disconnected, for the user's own Last seen history on the phone" />
+        </service>
 
         <!-- Live Translation: holds the AirPods' mic (Bluetooth SCO) while a session runs -->
         <service

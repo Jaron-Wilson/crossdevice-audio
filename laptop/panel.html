@@ -27,6 +27,7 @@ select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:
 </style>
 <h1>🎧 Headphones <canvas id=mini width=144 height=52 title="EQ curve"></canvas><span id=minilbl class=note></span></h1>
 <div id=none class=off>No controllable headphones connected.</div>
+<div id=seen class=note></div>
 
 <div id=cr>
  <div class=dev>Crusher ANC 2</div>
@@ -195,7 +196,11 @@ async function load(){let s=await (await fetch('/api/state')).json();S=s;
  const rb=s.rumble||{};sw('rb_eq',!!rb.eq);sw('rb_crusher',!!rb.crusher);
  if(s.spatial&&SP.mode!='tracked'){SP=s.spatial;renderSp();}
  if(s.eq&&drag<0){EQ=s.eq;if(EQ.gains)gains=EQ.gains.slice();renderEq();}
- $('none').className=(c.online||a.online)?'off':'';}
+ $('none').className=(c.online||a.online)?'off':'';seen();}
+async function seen(){try{const t=await (await fetch('/api/track')).json(),out=[];
+ for(const[k,n]of[['airpods','AirPods'],['crusher','Crusher']]){const d=t[k]||{};
+  if(!d.connected&&d.last_connected)out.push(n+' last connected to this laptop '+new Date(d.last_connected*1000).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'}));}
+ $('seen').textContent=out.join(' · ');}catch(e){}}
 for(const k of['conversational_awareness','personalized_volume','ear_detection','one_bud_anc','allow_off'])
  $('s_'+k).onclick=function(){apset(k,!this.classList.contains('on'));};
 // Press and hold: the AirPods never report this (0x1A), so until it's set from here it's unknown.

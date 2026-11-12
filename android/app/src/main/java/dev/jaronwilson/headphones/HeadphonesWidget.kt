@@ -72,6 +72,7 @@ class HeadphonesWidget : AppWidgetProvider() {
         private const val EXTRA_CMD = "cmd"
 
         @Volatile private var last: JSONObject? = null
+        @Volatile private var shown: JSONObject? = null     // the state last drawn (with the phone's own data)
 
         // One worker for all taps (serialized), plus the latest pending arg per device (coalescing).
         private val work = Executors.newSingleThreadExecutor()
@@ -83,7 +84,7 @@ class HeadphonesWidget : AppWidgetProvider() {
         fun panelState(context: Context): JSONObject? = fetch(context)
 
         /** Redraw from the last known state (e.g. after an EQ change in the app). */
-        fun redraw(context: Context) = render(context, last, null)
+        fun redraw(context: Context) = render(context, shown ?: last, null)
 
         /** Fetch and redraw; if the laptop disagrees about who has the AirPods, correct it first. */
         fun refresh(context: Context) {
@@ -95,7 +96,14 @@ class HeadphonesWidget : AppWidgetProvider() {
                 if (Handoff.tell(context, Handoff.local(context))) state = fetch(context)
             }
             render(context, withPhoneBattery(context, state), null)
+            // Last seen: a short low-power scan at most every ~5 minutes, then redraw the "last seen" line
+            runCatching { if (CrusherDirect.connected(context)) Tracker.crusherBatteryNow(context) }
+            runCatching { Tracker.periodicScan(context) }
+            render(context, shown, null)
         }
+
+        /** GET a panel path (e.g. /api/track), or throw. */
+        fun get(context: Context, path: String) = http(context, "GET", path)
 
         /** Refresh about every 5 minutes, only while the phone is awake (no wakeups, no battery cost). */
         private fun scheduleRefresh(context: Context) {
@@ -209,6 +217,7 @@ class HeadphonesWidget : AppWidgetProvider() {
         }
 
         private fun render(context: Context, state: JSONObject?, note: String?) {
+            if (note == null) shown = state
             val v = RemoteViews(context.packageName, R.layout.widget)
             val ap = state?.optJSONObject("airpods")
             val cr = state?.optJSONObject("crusher")
@@ -272,6 +281,16 @@ class HeadphonesWidget : AppWidgetProvider() {
                 Intent(context, TranslateActivity::class.java).setAction(TranslateActivity.ACTION_TOGGLE)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+
+            // Last seen: "AirPods last seen 2:41 PM", tap for the map
+            val seen = runCatching { Tracker.latest(context) }.getOrNull()
+            if (seen != null && !Tracker.connected(context, seen.device)) {
+                v.setViewVisibility(R.id.seen, View.VISIBLE)
+                v.setTextViewText(R.id.seen, "${Tracker.label(seen.device)} last seen ${Tracker.timeText(seen.t)}" +
+                    (if (seen.hasLocation) " · map" else ""))
+            } else v.setViewVisibility(R.id.seen, View.GONE)
+            v.setOnClickPendingIntent(R.id.seen, PendingIntent.getActivity(context, R.id.seen,
+                Intent(context, TrackActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE))
 
             val mgr = AppWidgetManager.getInstance(context)
             mgr.updateAppWidget(ComponentName(context, HeadphonesWidget::class.java), v)

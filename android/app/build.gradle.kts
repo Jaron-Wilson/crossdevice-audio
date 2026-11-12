@@ -19,8 +19,8 @@ android {
         applicationId = "dev.jaronwilson.headphones"
         minSdk = 31
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.3.2"
+        versionCode = 15
+        versionName = "1.4.0"
         // ML Kit's translate/language-id native libraries are large; Android 12+ phones are 64-bit ARM
         ndk { abiFilters += listOf("arm64-v8a") }
     }
@@ -56,5 +56,7 @@ dependencies {
     // Live Translation, all on-device: translation models (downloaded per language) and language ID (bundled)
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
+    // Last seen map: OpenStreetMap tiles, no API key, tiles cached on the phone
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
     testImplementation("junit:junit:4.13.2")
 }
