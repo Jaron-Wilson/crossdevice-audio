@@ -90,7 +90,7 @@ curve from clipping.
 
 | Platform | How it's applied |
 |---|---|
-| Linux laptop | `laptop/hp_eq.py` starts a `pipewire -c` filter-chain. It creates a "Headphones EQ" sink (`hp_eq.input`) and makes it the default, and the filter's output goes to the sink that was the default (or to `eq_target` in config.json). Gain changes are applied live with `pw-cli set-param`. Turning it off restores the old default |
+| Linux laptop | `laptop/hp_eq.py` starts a `pipewire -c` filter-chain registered as a WirePlumber smart filter in front of the default output (or `eq_target` in config.json); the default output and its volume stay the real headphones. Gain changes are applied live with `pw-cli set-param`. Turning it off just stops the process |
 | Android | `EqService` (a foreground service) uses `audiofx`. It tries DynamicsProcessing on the global session 0, then Equalizer on session 0, and also attaches to any player that broadcasts `ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION`. The biquad curve is sampled into 24 DynamicsProcessing bands, or into the phone's Equalizer bands |
 | Windows | `windows/eq_apo.py` writes `crossdevice-eq.txt` (Preamp, LSC, PK and HSC filters) into Equalizer APO's config folder and includes it from `config.txt`. **Equalizer APO must be installed**; the script installs nothing |
 

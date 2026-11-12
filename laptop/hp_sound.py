@@ -40,7 +40,9 @@ def _run(cmd, timeout=5):
 
 
 def sources():
-    """Microphones worth showing: the laptop's own (alsa) and the AirPods' call mic (bluez)."""
+    """Microphones the viewer may use: the laptop's own (alsa) only. The AirPods' mic is never offered:
+    opening it switches them to call mode (HFP), which drops music to phone quality and turns their
+    noise control into a call."""
     try:
         out = _run(["pactl", "list", "short", "sources"]).stdout
     except Exception:
@@ -54,10 +56,28 @@ def sources():
         name = parts[1]
         if name.startswith("alsa_input."):
             res.append({"id": name, "kind": "laptop", "label": "Laptop microphone", "muted": name in muted})
-        elif name.startswith("bluez_input."):
-            res.append({"id": name, "kind": "bluetooth", "muted": name in muted,
-                        "label": "Headphone microphone (call mode: lowers music quality while on)"})
     return res
+
+
+def laptop_mic():
+    s = sources()
+    return s[0]["id"] if s else ""
+
+
+def keep_default_source_off_headphones():
+    """If the default input is a Bluetooth headset mic, make the laptop mic the default instead: any app
+    that opens the default mic would otherwise pull the AirPods into call mode. Returns what it did."""
+    try:
+        cur = _run(["pactl", "get-default-source"]).stdout.strip()
+    except Exception:
+        return ""
+    if not cur.startswith("bluez_input."):
+        return ""
+    mic = laptop_mic()
+    if mic:
+        _run(["pactl", "set-default-source", mic])
+        return mic
+    return ""
 
 
 def _muted_sources():
@@ -77,26 +97,6 @@ def unmute(source):
     _run(["pactl", "set-source-mute", source, "0"])
 
 
-def card_of(source):
-    """bluez_input.AA:BB:.. -> bluez_card.AA_BB_.. (the card whose profile the call mic needs)."""
-    return "bluez_card." + source.split(".", 1)[1].split(".")[0].replace(":", "_")
-
-
-def card_profile(card):
-    try:
-        out = _run(["pactl", "list", "cards"]).stdout
-    except Exception:
-        return None
-    cur = None
-    for line in out.splitlines():
-        s = line.strip()
-        if s.startswith("Name: "):
-            cur = s[6:]
-        elif s.startswith("Active Profile: ") and cur == card:
-            return s[16:]
-    return None
-
-
 class Analyzer:
     """One capture at a time, shared by every viewer; stops a few seconds after the last one leaves."""
 
@@ -111,7 +111,6 @@ class Analyzer:
         self.watchers = 0
         self.last_watch = 0.0
         self.error = ""
-        self.restore = None        # (card, profile) to put back after using a headphone mic
         self.started = 0.0
         edges = np.geomspace(FMIN, FMAX, NBINS + 1) if np is not None else []
         self.freqs = np.fft.rfftfreq(NFFT, 1.0 / RATE) if np is not None else []
@@ -134,11 +133,9 @@ class Analyzer:
     def _start(self, source):
         self._stop()
         self.error = ""
-        if source.startswith("bluez_input."):
-            card = card_of(source)
-            prof = card_profile(card)
-            if prof and not prof.startswith("headset"):
-                self.restore = (card, prof)
+        if not source.startswith("alsa_input."):
+            self.error = "only the laptop microphone can be used"
+            return
         self.proc = subprocess.Popen(
             ["parec", "-d", source, "--rate", str(RATE), "--channels", "1", "--format", "float32le",
              "--raw", "--latency-msec", "60", "--client-name", "Headphones panel",
@@ -148,15 +145,6 @@ class Analyzer:
         self.started = time.time()
         self.hist = []
         threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
-        if self.restore:
-            # WirePlumber normally switches to call mode by itself once the call mic is opened; if it
-            # didn't (autoswitch turned off), do it here. _stop() switches back either way.
-            card, proc = self.restore[0], self.proc
-            def ensure():
-                time.sleep(2.5)
-                if proc is self.proc and not (card_profile(card) or "").startswith("headset"):
-                    _run(["pactl", "set-card-profile", card, "headset-head-unit"])
-            threading.Thread(target=ensure, daemon=True).start()
 
     def _stop(self, wait=False):
         p, self.proc = self.proc, None
@@ -168,16 +156,6 @@ class Analyzer:
                 try: p.kill()
                 except Exception: pass
         self.source = None
-        if self.restore:
-            card, prof = self.restore
-            self.restore = None
-            # WirePlumber switches back by itself when the call mic closes; make sure it did
-            def back():
-                time.sleep(2.5)
-                if card_profile(card) != prof:
-                    _run(["pactl", "set-card-profile", card, prof])
-            if wait: back()
-            else: threading.Thread(target=back, daemon=True).start()
 
     def _read(self, proc):
         buf = np.zeros(NFFT, dtype=np.float32)
@@ -209,10 +187,7 @@ class Analyzer:
             with self.lock:
                 if not self.proc:
                     continue
-                idle = self.watchers == 0 and time.time() - self.last_watch > 4
-                # never leave the headphones in call quality for long
-                hfp_long = self.restore and time.time() - self.started > 180
-                if idle or hfp_long:
+                if self.watchers == 0 and time.time() - self.last_watch > 4:
                     self._stop()
 
     # ---- public ----
@@ -319,115 +294,316 @@ def anc_advice(f, steady, tonal):
 
 # ---- notch filters on sound that passes through the laptop ----
 
+STATE_FILE = os.path.expanduser("~/.config/headphone-panel/notch.json")
+MAINS = (50.0, 60.0)
+
+
+def notch_q(f):
+    """Narrow, but wide enough (-3 dB width >= ~10 Hz) that a peak estimated a few Hz off still lands
+    in the notch."""
+    return round(max(2.0, min(8.0, f / 12.0)), 2)
+
+
+def snap_mains(f):
+    """Hum harmonics sit exactly on multiples of 50/60 Hz: snap a reading that is close to one."""
+    for base in MAINS:
+        n = round(f / base)
+        if 1 <= n <= 6 and abs(f - base * n) < 2.5 * n:
+            return base * n
+    return f
+
+
+def notch_graph(freqs):
+    nodes = [{"type": "builtin", "name": f"n{i}", "label": "bq_notch",
+              "control": {"Freq": float(f), "Q": notch_q(f)}} for i, f in enumerate(freqs)]
+    if len(nodes) == 3:
+        # PipeWire 1.6.2: a filter-chain graph of exactly 3 builtin nodes comes up with NO ports (checked:
+        # 1, 2, 4, 5, 6 nodes are fine, 3 always fails, stereo and mono). With no ports the filter
+        # passes nothing and nothing links to it: that is why "notch + harmonics" did nothing.
+        # A neutral 4th stage (a 0 dB peaking band) avoids it.
+        nodes.append({"type": "builtin", "name": f"n{len(nodes)}", "label": "bq_peaking",
+                      "control": {"Freq": 1000.0, "Q": 1.0, "Gain": 0.0}})
+    links = [{"output": f"n{i}:Out", "input": f"n{i + 1}:In"} for i in range(len(nodes) - 1)]
+    return {"nodes": nodes, "links": links, "inputs": ["n0:In"], "outputs": [f"n{len(nodes) - 1}:Out"]}
+
+
+def _conf_text(args):
+    return ("context.properties = { log.level = 0 }\n"
+            "context.spa-libs = {\n    audio.convert.* = audioconvert/libspa-audioconvert\n"
+            "    support.* = support/libspa-support\n}\n"
+            "context.modules = [\n"
+            "    { name = libpipewire-module-rt args = {} flags = [ ifexists nofail ] }\n"
+            "    { name = libpipewire-module-protocol-native }\n"
+            "    { name = libpipewire-module-client-node }\n"
+            "    { name = libpipewire-module-adapter }\n"
+            "    { name = libpipewire-module-filter-chain args = " + json.dumps(args) + " }\n]\n")
+
+
+def _pa_json(what):
+    try:
+        return json.loads(_run(["pactl", "-f", "json", "list", what]).stdout or "[]")
+    except Exception:
+        return []
+
+
+def _names(kind):
+    """index -> name for sinks or sources."""
+    return {x["index"]: x["name"] for x in _pa_json(kind)}
+
+
+# ---- silent measurement: the filter between a private sink and a null sink ----
+MRATE = 48000
+
+
+def _tone_wav(path, tones, secs):
+    import wave
+    t = np.arange(int(MRATE * secs)) / MRATE
+    x = sum(10 ** (a / 20) * np.sin(2 * np.pi * f * t) for f, a in tones)
+    x = x * np.minimum(1, np.minimum(t, t[::-1]) / 0.05)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(MRATE)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+
+
+def _capture(play_target, monitor, wav, secs):
+    rec = subprocess.Popen(["parec", "-d", monitor, "--rate", str(MRATE), "--channels", "1",
+                            "--format", "float32le", "--raw", "--latency-msec", "20"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    time.sleep(0.5)
+    _run(["pw-play", "--target", play_target, wav], timeout=secs + 10)
+    time.sleep(0.4)
+    os.killpg(rec.pid, signal.SIGTERM)
+    data = rec.stdout.read()
+    return np.frombuffer(data[: len(data) // 4 * 4], dtype=np.float32)
+
+
+def _levels(y, freqs):
+    n = MRATE
+    if len(y) < n:
+        return None, None
+    env = np.convolve(np.abs(y), np.ones(4800) / 4800, mode="same")
+    on = np.where(env > env.max() * 0.3)[0]
+    if len(on) == 0:
+        return None, None
+    a = max(0, (on[0] + on[-1]) // 2 - n // 2)
+    seg = y[a:a + n]
+    if len(seg) < n:
+        return None, None
+    spec = np.abs(np.fft.rfft(seg * np.hanning(n))) / (n / 4)
+    lv = [20 * np.log10(spec[max(0, int(round(f)) - 3): int(round(f)) + 4].max() + 1e-12) for f in freqs]
+    return lv, 20 * np.log10(float(np.abs(y[on[0]:on[-1]]).max()) + 1e-12)
+
+
+def measure(graph, tones, channels=2, secs=1.6):
+    """Play `tones` [(Hz, dBFS)] through a private copy of the filter graph into a null sink and
+    through a bypass, and compare. Nothing is audible and the real audio path is not touched."""
+    if np is None:
+        return {"error": "numpy is not installed"}
+    import tempfile
+    uid = f"{os.getpid()}{int(time.time() * 1000) % 100000}"
+    null, fname = f"hp_mtest{uid}", f"hp_mtest{uid}_in"
+    tmp = tempfile.mkdtemp(prefix="hp-measure-")
+    wav, conf = os.path.join(tmp, "t.wav"), os.path.join(tmp, "f.conf")
+    _tone_wav(wav, tones, secs)
+    mod = _run(["pactl", "load-module", "module-null-sink", f"sink_name={null}", "channels=1",
+                "sink_properties=device.description=PanelFilterTest node.passive=true priority.session=0"]).stdout.strip()
+    proc = None
+    try:
+        pos = ["FL", "FR"] if channels == 2 else ["MONO"]
+        with open(conf, "w") as f:
+            f.write(_conf_text({"node.description": "Panel filter test", "media.name": "Panel filter test",
+                                "filter.graph": graph, "audio.channels": channels, "audio.position": pos,
+                                "capture.props": {"node.name": fname, "media.class": "Audio/Sink",
+                                                  "node.passive": True, "priority.session": 0},
+                                "playback.props": {"node.name": fname + ".output", "node.passive": True,
+                                                   "node.dont-reconnect": True, "target.object": null}}))
+        proc = subprocess.Popen(["pipewire", "-c", conf], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        for _ in range(40):
+            if fname in _names("sinks").values():
+                break
+            time.sleep(0.1)
+        else:
+            return {"error": "the test filter did not start"}
+        time.sleep(0.3)
+        freqs = [f for f, _ in tones]
+        lb, pb = _levels(_capture(null, null + ".monitor", wav, secs), freqs)
+        lf, pf = _levels(_capture(fname, null + ".monitor", wav, secs), freqs)
+        if lb is None or lf is None:
+            return {"error": "no test signal came through"}
+        return {"tones": [{"hz": round(f, 1), "bypass_db": round(a, 1), "filtered_db": round(b, 1),
+                           "change_db": round(b - a, 1)} for f, a, b in zip(freqs, lb, lf)],
+                "peak_bypass_dbfs": round(pb, 1), "peak_filtered_dbfs": round(pf, 1)}
+    finally:
+        if proc:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM); proc.wait(3)
+            except Exception:
+                pass
+        if mod.isdigit():
+            _run(["pactl", "unload-module", mod])
+        for p in (wav, conf):
+            try: os.remove(p)
+            except OSError: pass
+        try: os.rmdir(tmp)
+        except OSError: pass
+
+
+def measure_notch(freqs):
+    """Depth at each notch and the largest change at reference tones away from all notches."""
+    refs = []
+    for f in freqs:
+        for r in (f / 2, f * 1.6, f * 3.2):
+            if 25 <= r <= 11000 and all(abs(np.log2(r / g)) > 0.5 for g in freqs) and \
+                    all(abs(np.log2(r / x)) > 0.2 for x in refs):
+                refs.append(r)
+    tones = [(f, -20) for f in freqs] + [(r, -20) for r in refs[:4]]
+    m = measure(notch_graph(freqs), tones)
+    if "error" in m:
+        return m
+    t = m["tones"]
+    return {"notch": [{"hz": x["hz"], "db": x["change_db"]} for x in t[:len(freqs)]],
+            "elsewhere_max_db": round(max([abs(x["change_db"]) for x in t[len(freqs):]] or [0]), 1),
+            "elsewhere": [{"hz": x["hz"], "db": x["change_db"]} for x in t[len(freqs):]],
+            "t": time.time()}
+
 
 class Notch:
-    """A PipeWire filter-chain with up to 6 notches. kind "mic": a virtual microphone (the laptop mic
-    with the notches) made the default input. kind "output": a virtual output in front of the current
-    default output, made the default. Off puts the old default back and stops the process."""
+    """A PipeWire filter-chain with up to 6 notches, for sound that passes THROUGH the laptop. Both are
+    WirePlumber smart filters, so no default device changes and apps don't need moving:
 
-    NAMES = {"mic": ("hp_notch_mic", "Microphone (notch filter)"),
-             "output": ("hp_notch_out", "Headphones (notch filter)")}
+    kind "mic": sits in front of the laptop mic; apps recording from the laptop mic get the notched sound.
+    kind "output": sits in front of the default output (before the EQ, if that is on); everything
+    playing to the headphones goes through it.
+    The on/off state survives a panel restart (notch.json)."""
+
+    NAMES = {"mic": ("hp_notch_mic", "Laptop mic (notch filter)"),
+             "output": ("hp_notch_out", "Laptop output (notch filter)")}
 
     def __init__(self, kind):
         self.kind = kind
         self.name, self.desc = self.NAMES[kind]
         self.proc = None
         self.freqs = []
-        self.prev_default = ""
+        self.device = ""
         self.error = ""
+        self.measured = None
         self.lock = threading.Lock()
         self.conf = os.path.expanduser(f"~/.cache/headphone-panel/{self.name}.conf")
+        self.match = None
+        # set by the panel: (device name, WirePlumber match rules) of the current output device
+        self.output_target = lambda: ("", None)
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def state(self):
-        return {"on": self.running(), "freqs": self.freqs, "error": self.error}
+    def check_target(self):
+        """Output notch: follow the default output when it changes (AirPods -> Crusher...)."""
+        if self.kind != "output" or not self.running():
+            return
+        dev, match = self.output_target()
+        if match and match != self.match:
+            self.set(self.freqs, save=False)
 
-    def _conf(self, freqs, target):
-        nodes = [{"type": "builtin", "name": f"n{i}", "label": "bq_notch",
-                  "control": {"Freq": float(f), "Q": 8.0 if f < 300 else 4.0}} for i, f in enumerate(freqs)]
-        links = [{"output": f"n{i}:Out", "input": f"n{i + 1}:In"} for i in range(len(nodes) - 1)]
+    def _links(self):
+        """(apps feeding the filter, devices the filter feeds), from pw-link."""
+        try:
+            out = _run(["pw-link", "-l"]).stdout
+        except Exception:
+            return [], []
+        ins, outs, cur = set(), set(), None
+        node_in = self.name if self.kind == "output" else self.name + ".capture"
+        node_out = self.name + ".output" if self.kind == "output" else self.name
+        for line in out.splitlines():
+            if not line.startswith(" "):
+                cur = line.rsplit(":", 1)[0]          # node names can contain ':' (Bluetooth addresses)
+                continue
+            peer = line.strip()[3:].strip().rsplit(":", 1)[0]
+            if line.strip().startswith("|<-") and cur == (self.name if self.kind == "output" else node_in):
+                ins.add(peer)
+            if line.strip().startswith("|->") and cur == node_out:
+                outs.add(peer)
+        return sorted(ins), sorted(outs)
+
+    def state(self):
+        on = self.running()
+        ins, outs = self._links() if on else ([], [])
+        return {"on": on, "freqs": self.freqs, "error": self.error, "device": self.device,
+                "from": ins, "to": outs, "measured": self.measured if on else None}
+
+    def _conf(self, freqs, match):
+        smart = {"filter.smart": True, "filter.smart.name": self.name}
+        if match:
+            smart["filter.smart.target"] = match
         if self.kind == "mic":
-            cap = {"node.name": self.name + ".capture", "node.passive": True, "target.object": target}
-            play = {"node.name": self.name, "media.class": "Audio/Source", "node.description": self.desc}
+            cap = {"node.name": self.name + ".capture", "node.passive": True}
+            play = {"node.name": self.name, "media.class": "Audio/Source", "node.description": self.desc,
+                    **smart}
             ch, pos = 1, ["MONO"]
         else:
-            cap = {"node.name": self.name, "media.class": "Audio/Sink", "node.description": self.desc}
-            play = {"node.name": self.name + ".output", "node.passive": True, "node.dont-reconnect": True,
-                    "target.object": target}
+            cap = {"node.name": self.name, "media.class": "Audio/Sink", "node.description": self.desc,
+                   **smart}
+            play = {"node.name": self.name + ".output", "node.passive": True}
             ch, pos = 2, ["FL", "FR"]
-        args = {"node.description": self.desc, "media.name": self.desc,
-                "filter.graph": {"nodes": nodes, "links": links},
-                "audio.channels": ch, "audio.position": pos, "capture.props": cap, "playback.props": play}
-        return ("context.spa-libs = {\n    audio.convert.* = audioconvert/libspa-audioconvert\n"
-                "    support.* = support/libspa-support\n}\n"
-                "context.modules = [\n"
-                "    { name = libpipewire-module-rt args = {} flags = [ ifexists nofail ] }\n"
-                "    { name = libpipewire-module-protocol-native }\n"
-                "    { name = libpipewire-module-client-node }\n"
-                "    { name = libpipewire-module-adapter }\n"
-                "    { name = libpipewire-module-filter-chain args = " + json.dumps(args) + " }\n]\n")
+        return _conf_text({"node.description": self.desc, "media.name": self.desc,
+                           "filter.graph": notch_graph(freqs), "audio.channels": ch, "audio.position": pos,
+                           "capture.props": cap, "playback.props": play})
 
-    def _default(self):
-        what = "source" if self.kind == "mic" else "sink"
-        try:
-            return _run(["pactl", f"get-default-{what}"]).stdout.strip()
-        except Exception:
-            return ""
-
-    def _set_default(self, name):
-        _run(["pactl", "set-default-" + ("source" if self.kind == "mic" else "sink"), name])
-
-    def _exists(self):
-        what = "sources" if self.kind == "mic" else "sinks"
-        try:
-            return any(l.split("\t")[1] == self.name
-                       for l in _run(["pactl", "list", "short", what]).stdout.splitlines() if "\t" in l)
-        except Exception:
-            return False
-
-    def set(self, freqs, target=None):
+    def set(self, freqs, hum=False, save=True):
         """Turn on with these notch frequencies (Hz), or off with an empty list."""
-        freqs = sorted({round(max(20.0, min(11000.0, float(f))), 1) for f in freqs})[:6]
+        freqs = [snap_mains(f) if hum else f for f in (float(x) for x in freqs)]
+        freqs = sorted({round(max(20.0, min(11000.0, f)), 1) for f in freqs})[:6]
         with self.lock:
             self._off()
+            if save:
+                self._save(freqs)
             if not freqs:
+                self.error = ""
                 return self.state()
-            cur = self._default()
-            if not target:
-                if self.kind == "mic":
-                    # notch the laptop's own mic: the headphone call mic would drop the music quality
-                    mics = [s["id"] for s in sources() if s["kind"] == "laptop"]
-                    target = mics[0] if mics else cur
-                else:
-                    target = cur
-            if not target:
-                self.error = "no input/output to filter"
-                return self.state()
+            if self.kind == "mic":
+                self.device = laptop_mic()      # never the AirPods mic: that means call mode
+                self.match = {"node.name": self.device}
+                if not self.device:
+                    self.error = "no laptop microphone found"
+                    return self.state()
+            else:
+                self.device, self.match = self.output_target()
+                if not self.match:
+                    self.error = "no output device found"
+                    return self.state()
             os.makedirs(os.path.dirname(self.conf), exist_ok=True)
             with open(self.conf, "w") as f:
-                f.write(self._conf(freqs, target))
+                f.write(self._conf(freqs, self.match))
             self.proc = subprocess.Popen(["pipewire", "-c", self.conf], stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.PIPE, start_new_session=True)
-            for _ in range(30):
+                                         stderr=subprocess.DEVNULL, start_new_session=True)
+            what = "sources" if self.kind == "mic" else "sinks"
+            self.error = ""
+            for _ in range(40):
                 if self.proc.poll() is not None:
-                    self.error = (self.proc.stderr.read() or b"").decode(errors="replace")[-300:] or "pipewire exited"
+                    self.error = "the filter process exited (pipewire -c failed)"
                     self.proc = None
                     return self.state()
-                if self._exists():
+                if self.name in _names(what).values():
                     break
                 time.sleep(0.1)
-            self.prev_default = cur if cur != self.name else self.prev_default
+            else:
+                self.error = "the filter did not appear in PipeWire"
             self.freqs = freqs
-            self.error = ""
-            self._set_default(self.name)
-            return self.state()
+            self.measured = {"pending": True}
+        threading.Thread(target=self._measure, args=(freqs,), daemon=True).start()
+        return self.state()
+
+    def _measure(self, freqs):
+        try:
+            m = measure_notch(freqs)
+        except Exception as e:
+            m = {"error": str(e)[:200]}
+        with self.lock:
+            if self.freqs == freqs:
+                self.measured = m
 
     def _off(self):
         if self.running():
-            if self._default() == self.name and self.prev_default:
-                self._set_default(self.prev_default)
             try:
                 os.killpg(self.proc.pid, signal.SIGTERM)
                 self.proc.wait(3)
@@ -436,7 +612,31 @@ class Notch:
                 except Exception: pass
         self.proc = None
         self.freqs = []
+        self.measured = None
+
+    def _save(self, freqs):
+        try:
+            d = json.load(open(STATE_FILE))
+        except (OSError, ValueError):
+            d = {}
+        d[self.kind] = freqs
+        try:
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+            with open(STATE_FILE, "w") as f:
+                json.dump(d, f)
+        except OSError:
+            pass
+
+    def restore_saved(self):
+        """After a panel restart: turn back on with the saved notches."""
+        try:
+            freqs = json.load(open(STATE_FILE)).get(self.kind) or []
+        except (OSError, ValueError):
+            freqs = []
+        if freqs and not self.running():
+            self.set(freqs, save=False)
 
     def shutdown(self):
+        """Panel stopping: take the filter down but keep the saved state."""
         with self.lock:
             self._off()

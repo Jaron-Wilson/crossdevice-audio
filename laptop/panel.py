@@ -250,6 +250,8 @@ class AirPods(threading.Thread):
         super().__init__()
         self.sock=None; self.lock=threading.Lock()
         self.mode=None; self.battery={}; self.online=False; self.ctl={}
+        self.ear=None        # (primary, secondary): 0 in ear, 1 out of ear, 2 in case (AAP 0x06)
+        self.speaking=None   # (level, time) from Conversation Awareness (AAP 0x4B)
         self.echo={}     # id -> time the AirPods last sent that setting (a report or the echo of a change)
         self.wake = threading.Event(); self.fast = False
         try: self.phone = open(HANDOFF_FILE).read().strip() == "phone"
@@ -266,6 +268,10 @@ class AirPods(threading.Thread):
             subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
         self.wake.set()
     def _parse(self,p):
+        if p[:6]==bytes.fromhex("040004000600") and len(p)>=8:
+            self.ear=(p[6],p[7]); raw_log("<", p)
+        if p[:6]==bytes.fromhex("040004004b00") and len(p)>=10:
+            self.speaking=(p[9],time.time()); raw_log("<", p)
         if p[:6]==CTL_HDR and len(p)>=8:
             self.ctl[p[6]]=bytes(p[7:11]); self.echo[p[6]]=time.time()
         i=p.find(NC)
@@ -305,7 +311,7 @@ class AirPods(threading.Thread):
                 if repr(e) != getattr(self, "last_err", None):      # log each new kind of failure once
                     self.last_err = repr(e); print("AirPods AAP:", repr(e), flush=True)
             with self.lock: self.sock=None
-            self.online=False; self.mode=None; self.battery={}; self.ctl={}; self.echo={}
+            self.online=False; self.mode=None; self.battery={}; self.ctl={}; self.echo={}; self.ear=None; self.speaking=None
             if self.phone:
                 subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
             # long backoff (a short one fights another host); a hand-off back wakes us at once
@@ -319,6 +325,35 @@ class AirPods(threading.Thread):
                 self.sock.sendall(bytes.fromhex("0400040009000D")+bytes([MODE[name],0,0,0])); return True
             except Exception:
                 return False
+    def set_mode_wait(self, name, wait=1.5):
+        """Set the noise mode and wait for the AirPods to echo it (they do for 0x0D)."""
+        t0=time.time()
+        if not self.set_mode(name): return False, False
+        while time.time()-t0<wait:
+            if self.echo.get(0x0D,0)>=t0 and self.mode==MODE[name]: return True, True
+            time.sleep(0.05)
+        return True, False
+    def block(self, level, mode="adaptive"):
+        """Block noise with the AirPods themselves: Adaptive mode + its noise level (0x2E, 0 = hear the
+        most, 100 = block the most), or full ANC. The AirPods echo the mode at once; the level is applied
+        silently and only reported again when the AAP link reopens, so read it back to confirm."""
+        res={"mode":mode}
+        ok,res["mode_confirmed"]=self.set_mode_wait(mode)
+        if not ok: return None
+        if mode=="adaptive" and level is not None:
+            lvl=max(0,min(100,int(level)))
+            sent,_=self.set_setting("adaptive_level",lvl)
+            if not sent: return None
+            res["level"]=lvl
+            t0=time.time(); time.sleep(0.3); self.refresh()
+            while time.time()-t0<8:
+                if self.online and self.echo.get(0x2E,0)>t0: break
+                time.sleep(0.1)
+            got=self.ctl.get(0x2E) if self.echo.get(0x2E,0)>t0 else None
+            res["level_reported"]=got[0] if got else None
+            res["level_confirmed"]=bool(got) and got[0]==lvl
+            res["mode_now"]=MNAME.get(self.mode,self.mode)
+        return res
     def send(self, pkt):
         with self.lock:
             if not self.sock: return False
@@ -362,7 +397,14 @@ class AirPods(threading.Thread):
         bat = self.battery
         if not bat and time.time() - BLE["t"] < 300:
             bat = BLE["battery"]
+        EAR={0:"in ear",1:"out of ear",2:"in case"}
+        ear=[EAR.get(x,str(x)) for x in self.ear] if self.ear else None
+        sp=None
+        if self.speaking and time.time()-self.speaking[1]<600:
+            lv=self.speaking[0]
+            sp={"speaking": lv in (1,2) or (3<lv<8), "level": lv, "ago": round(time.time()-self.speaking[1])}
         return {"online": self.online, "mode": MNAME.get(self.mode, self.mode), "battery": bat,
+                "ear": ear, "speaking": sp,
                 "on_phone": self.phone, "settings": self.settings(), "reported": self.reported()}
 
 AP = AirPods(); AP.start()
@@ -374,9 +416,9 @@ try:
 except Exception as e:      # missing eq_presets.json etc.: the rest of the panel still works
     EQ = None; EQ_ERR = str(e)
 def eq_loop():
-    while EQ:
-        try: EQ.tick()
-        except Exception: pass
+    time.sleep(1)
+    while True:
+        audio_tick()
         time.sleep(5)
 threading.Thread(target=eq_loop, daemon=True).start()
 def eq_state():
@@ -389,6 +431,29 @@ try:
     NOTCH = {k: hp_sound.Notch(k) for k in ("mic", "output")}
 except Exception as e:
     SOUND = None; NOTCH = {}; SOUND_ERR = str(e)
+def _output_target():
+    dev = hp_eq.real_sink(hp_eq.default_sink()) if EQ else ""
+    return dev, (hp_eq.smart_target(dev) if dev else None)
+if NOTCH and EQ:
+    NOTCH["output"].output_target = _output_target
+def audio_tick():
+    """Every few seconds: EQ attached, default output on a real device, and the default input never the
+    AirPods mic (an app opening it would switch them to call mode)."""
+    if NOTCH:
+        try: hp_sound.keep_default_source_off_headphones()
+        except Exception: pass
+    if EQ:
+        try: EQ.tick()
+        except Exception: pass
+    if "output" in NOTCH:
+        try: NOTCH["output"].check_target()
+        except Exception: pass
+def notch_restore():
+    time.sleep(3)
+    for n in NOTCH.values():
+        try: n.restore_saved()
+        except Exception as e: n.error = str(e)
+threading.Thread(target=notch_restore, daemon=True).start()
 def sound_state():
     if not SOUND: return {"available": False, "error": SOUND_ERR}
     return {"available": SOUND.available(), "error": "" if SOUND.available() else "numpy is not installed",
@@ -478,7 +543,14 @@ class H(BaseHTTPRequestHandler):
             if self.path=="/api/sound/notch":
                 j=json.loads(body or "{}")
                 if j.get("kind") not in NOTCH: return self._s(400,json.dumps({"error":"kind must be mic or output"}))
-                return self._s(200,json.dumps(NOTCH[j["kind"]].set(j.get("freqs") or [])))
+                return self._s(200,json.dumps(NOTCH[j["kind"]].set(j.get("freqs") or [], hum=bool(j.get("hum")))))
+            if self.path=="/api/airpods/block":
+                j=json.loads(body or "{}")
+                mode=j.get("mode","adaptive")
+                if mode not in ("adaptive","anc"): return self._s(400,json.dumps({"error":"mode must be adaptive or anc"}))
+                r=AP.block(j.get("level"), mode)
+                if r is None: return self._s(503,json.dumps({"error":"AirPods not connected"}))
+                return self._s(200,json.dumps(r))
             if self.path=="/api/airpods/mode":
                 if body not in MODE: return self._s(400,json.dumps({"error":"unknown mode"}))
                 ok=AP.set_mode(body)
@@ -492,7 +564,7 @@ class H(BaseHTTPRequestHandler):
 if __name__=="__main__":
     import signal, sys
     def cleanup():
-        if SOUND: SOUND.stop(wait=True)   # also returns the headphones from call mode
+        if SOUND: SOUND.stop(wait=True)
         for n in NOTCH.values(): n.shutdown()
         if EQ: EQ.shutdown()      # put the real headphones back as the default output
     def bye(*_):
