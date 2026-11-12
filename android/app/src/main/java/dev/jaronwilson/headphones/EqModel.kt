@@ -92,8 +92,21 @@ object EqModel {
         return next
     }
 
-    /** Headroom so boosts don't clip. */
-    fun preamp(g: List<Double>) = -(g.maxOrNull()?.coerceAtLeast(0.0) ?: 0.0)
+    private const val HEADROOM_SHARE = 0.5      // cut by this share of the curve's peak boost (as the laptop does)
+
+    /** Largest boost of the whole EQ curve over the music range (40 Hz - 16 kHz), in dB, never below 0. */
+    fun curvePeak(bands: List<Band>, gains: List<Double>): Double {
+        var best = 0.0
+        for (i in 0..60) best = maxOf(best, responseDb(bands, gains, 40.0 * (16000.0 / 40.0).pow(i / 60.0)))
+        return best
+    }
+
+    /** Headroom so boosts don't clip: a cut of half the curve's peak, in 0.5 dB steps. The service's
+     *  limiter catches whatever the half-cut leaves. Same model as the laptop's hp_eq.preamp. */
+    fun preamp(bands: List<Band>, gains: List<Double>): Double =
+        -Math.round(HEADROOM_SHARE * curvePeak(bands, gains) * 2) / 2.0
+
+    fun headroomDb(c: Context): Double = preamp(bands(c), gains(c))
 
     // ---- filter math ----
     private const val FS = 48000.0

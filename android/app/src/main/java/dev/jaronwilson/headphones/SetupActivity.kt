@@ -52,6 +52,15 @@ class SetupActivity : Activity() {
     private lateinit var eqStatus: TextView
     private lateinit var apBox: LinearLayout
     private lateinit var apLevel: SeekBar
+    private lateinit var apLevelText: TextView
+    private lateinit var eqHeadroom: TextView
+    private val switchTitles = LinkedHashMap<String, String>()
+    private val smartSw = LinkedHashMap<String, Switch>()
+    private val smartSpin = LinkedHashMap<String, LinkedHashMap<Act, Spinner>>()
+    private val smartStatus = LinkedHashMap<String, TextView>()
+    private lateinit var smartCall: Switch
+    private lateinit var smartNote: TextView
+    private lateinit var crFeat: TextView
     private lateinit var apNote: TextView
     private val apSwitches = LinkedHashMap<String, Switch>()
     private val phButtons = LinkedHashMap<String, Button>()
@@ -61,8 +70,6 @@ class SetupActivity : Activity() {
     private var phDraft: List<String>? = null
     private lateinit var crBox: LinearLayout
     private lateinit var crBassOn: Switch
-    private lateinit var crTl: SeekBar
-    private lateinit var crTlRow: LinearLayout
     private val crSwitches = LinkedHashMap<String, Switch>()
     private var lastEqPush = 0L
 
@@ -76,12 +83,31 @@ class SetupActivity : Activity() {
         if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1) else loadDevices()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) =
-        loadDevices()
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
+        val granted = results.isNotEmpty() && results.all { it == PackageManager.PERMISSION_GRANTED }
+        when (requestCode) {
+            REQ_ACTIVITY -> {
+                if (!granted) { for (dev in SmartAdaptive.DEVICES) SmartAdaptive.setEnabled(this, dev, false); toast("Smart adaptive needs the Physical activity permission") }
+                SmartAdaptive.sync(this); refreshSmart()
+            }
+            REQ_PHONE -> {
+                SmartAdaptive.setCallAware(this, granted)
+                if (!granted) toast("Call detection needs the Phone permission")
+                refreshSmart()
+            }
+            else -> loadDevices()
+        }
+    }
 
     override fun onResume() {
         super.onResume()
         loadControls()
+        if (::smartNote.isInitialized) { SmartAdaptive.sync(this); refreshSmart() }
+    }
+
+    private companion object {
+        const val REQ_ACTIVITY = 2
+        const val REQ_PHONE = 3
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -138,20 +164,48 @@ class SetupActivity : Activity() {
         eq.addView(eqCurve, lp(8))
         eqStatus = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(8), 0, 0) }
         eq.addView(eqStatus)
+        eqHeadroom = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")) }
+        eq.addView(eqHeadroom)
         col.addView(eq, lp(0))
 
         // ---- AirPods ----
         apBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
         apBox.addView(label("AirPods", 15f, "#E8EDF2"))
         val ap = card()
-        ap.addView(label("Adaptive noise level (while in Adaptive)", 12f))
-        // slider position = 100 - raw: left = less noise (more filtering), right = more noise
-        apLevel = seek(100) { v -> setAp("adaptive_level", 100 - v) }
+        ap.addView(label("Block noise", 13f, "#E8EDF2"))
+        ap.addView(TextView(this).apply {
+            text = "Your AirPods listen with their own mics and adjust automatically."
+            textSize = 12f; setTextColor(Color.parseColor("#8AA6B4"))
+        })
+        // slider position = 100 - level: left = block more (level 100), right = hear more (level 0)
+        apLevelText = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#E8EDF2")); setPadding(0, dp(8), 0, 0) }
+        ap.addView(apLevelText)
+        apLevel = seek(100) { v -> setAdaptive(100 - v) }
+        apLevel.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, v: Int, fromUser: Boolean) { apLevelText.text = "Adaptive level: blocks ${100 - v}%" }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) { if (!binding) setAdaptive(100 - sb.progress) }
+        })
         ap.addView(apLevel)
-        ap.addView(ends("Less noise", "More noise"))
+        ap.addView(ends("Block more", "Hear more"))
+        val quick = LinearLayout(this)
+        for ((t, act) in listOf<Pair<String, () -> Unit>>(
+            "Block max" to { setAdaptive(100) }, "Balanced" to { setAdaptive(50) },
+            "Hear more" to { setAdaptive(0) }, "Full ANC" to { setApMode("anc") })) {
+            quick.addView(Button(this).apply { text = t; isAllCaps = false; textSize = 12f; setOnClickListener { act() } },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        }
+        ap.addView(quick)
+        ap.addView(TextView(this).apply {
+            text = "Adaptive and ANC lower outside sound as a whole, steady low sounds (engines, fans) most. " +
+                "They can't pick out one frequency. The level is applied silently: the AirPods report it again " +
+                "only when the link reopens (Read back below)."
+            textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(6), 0, dp(6))
+        })
         for ((k, t) in listOf("conversational_awareness" to "Conversational Awareness",
                 "personalized_volume" to "Personalized Volume", "ear_detection" to "Automatic ear detection",
                 "one_bud_anc" to "Noise cancelling with one AirPod", "allow_off" to "Offer \"Off\" in press and hold")) {
+            switchTitles[k] = t
             apSwitches[k] = switch(t) { on -> setAp(k, on) }.also { ap.addView(it) }
         }
         ap.addView(label("Press and hold cycles through (at least two)", 12f))
@@ -166,8 +220,7 @@ class SetupActivity : Activity() {
                         phDraft = next; colorPh(next); toast("Pick at least two modes")
                     } else {
                         phDraft = null; phModes = next; colorPh(next)
-                        if ("off" in next && "off" !in cur) setAp("allow_off", true)
-                        setAp("press_hold_modes", next)
+                        setPressHold(next)
                     }
                 }
             }.also { ph.addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)) }
@@ -175,6 +228,10 @@ class SetupActivity : Activity() {
         ap.addView(ph)
         apNote = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")) }
         ap.addView(apNote)
+        ap.addView(Button(this).apply {
+            text = "Read back from AirPods"; isAllCaps = false
+            setOnClickListener { readBack() }
+        })
         apBox.addView(ap)
         col.addView(apBox)
 
@@ -184,16 +241,109 @@ class SetupActivity : Activity() {
         val cr = card()
         crBassOn = switch("Sensory bass (haptic) on") { on -> setCr("bass_on", on) }
         cr.addView(crBassOn)
-        crTlRow = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        crTlRow.addView(label("Transparency level", 12f))
-        crTl = seek(100) { v -> setCr("transparency_level", v) }
-        crTlRow.addView(crTl); crTlRow.addView(ends("quieter outside", "louder outside"))
-        cr.addView(crTlRow)
         for ((k, t) in listOf("at_on_call" to "Hear-through on calls", "at_on_pause" to "Hear-through when paused"))
             crSwitches[k] = switch(t) { on -> setCr(k, on) }.also { cr.addView(it) }
+        crFeat = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(6), 0, 0) }
+        cr.addView(crFeat)
         crBox.addView(cr)
         col.addView(crBox)
+        buildSmart(col)
         refreshEq()
+    }
+
+    // ---- Smart adaptive ----
+    private fun devName(dev: String) = if (dev == SmartAdaptive.CRUSHER) "Crusher" else "AirPods"
+
+    private fun buildSmart(col: LinearLayout) {
+        col.addView(label("Smart adaptive", 15f, "#E8EDF2"))
+        val c = card()
+        c.addView(TextView(this).apply {
+            text = "Switches the noise mode by what your phone's motion sensors say you are doing. " +
+                "Phone sensors only: no microphone is used. A new activity must hold about 20 seconds, " +
+                "and it switches at most once every 30 seconds. Off by default."
+            textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(8), 0, dp(4))
+        })
+        for (dev in SmartAdaptive.DEVICES) {
+            smartSw[dev] = switch("${devName(dev)}: switch by activity") { on -> toggleSmart(dev, on) }.also { c.addView(it) }
+            smartStatus[dev] = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#99FFBB")) }.also { c.addView(it) }
+            val spins = LinkedHashMap<Act, Spinner>()
+            for (a in SmartAdaptive.ACTS) {
+                val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                row.addView(TextView(this).apply { text = a.label.replaceFirstChar { it.uppercase() }; textSize = 13f
+                    setTextColor(Color.parseColor("#E8EDF2")) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                val opts = SmartAdaptive.options(dev)
+                val sp = Spinner(this).apply {
+                    adapter = ArrayAdapter(this@SetupActivity, android.R.layout.simple_spinner_dropdown_item, opts.map { it.second })
+                    onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                        override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                            if (!binding) { SmartAdaptive.setChoice(this@SetupActivity, dev, a, opts[pos].first); pokeSmart() }
+                        }
+                        override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
+                    }
+                }
+                row.addView(sp, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.4f))
+                spins[a] = sp; c.addView(row)
+            }
+            smartSpin[dev] = spins
+        }
+        smartCall = switch("Phone calls count (needs phone-state permission)") { on -> toggleCall(on) }.also { c.addView(it) }
+        smartNote = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")) }
+        c.addView(smartNote)
+        col.addView(c, lp(10))
+        refreshSmart()
+    }
+
+    private fun refreshSmart() {
+        binding = true
+        for (dev in SmartAdaptive.DEVICES) {
+            smartSw.getValue(dev).isChecked = SmartAdaptive.enabled(this, dev)
+            smartStatus.getValue(dev).text = if (SmartAdaptive.enabled(this, dev)) SmartAdaptive.status(this, dev) else ""
+            for ((a, sp) in smartSpin.getValue(dev)) {
+                val i = SmartAdaptive.options(dev).indexOfFirst { it.first == SmartAdaptive.choice(this, dev, a) }
+                sp.setSelection(i.coerceAtLeast(0))
+            }
+        }
+        smartCall.isChecked = SmartAdaptive.callAware(this) && SmartAdaptive.hasPhonePermission(this)
+        smartNote.text = SmartAdaptive.registration(this)
+        binding = false
+    }
+
+    /** A choice changed: re-evaluate now (Bluetooth work, off the main thread). */
+    private fun pokeSmart() {
+        val app = applicationContext
+        io.execute { SmartAdaptive.process(app); runOnUiThread { refreshSmart() } }
+    }
+
+    private fun toggleSmart(dev: String, on: Boolean) {
+        SmartAdaptive.setEnabled(this, dev, on)
+        if (on && !SmartAdaptive.hasActivityPermission(this)) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Physical activity")
+                .setMessage("Android asks for \"Physical activity\" so the phone can tell when you are still, walking, cycling or in a vehicle. " +
+                    "Only the phone's motion sensors are used, nothing is recorded or sent anywhere, and no microphone is touched.")
+                .setPositiveButton("Continue") { _, _ -> requestPermissions(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION), REQ_ACTIVITY) }
+                .setNegativeButton("Cancel") { _, _ -> SmartAdaptive.setEnabled(this, dev, false); refreshSmart() }
+                .setOnCancelListener { SmartAdaptive.setEnabled(this, dev, false); refreshSmart() }
+                .show()
+            return
+        }
+        SmartAdaptive.sync(this)
+        if (!on) pokeSmart()
+        io.execute { runOnUiThread { refreshSmart() } }
+        smartNote.postDelayed({ refreshSmart() }, 1500)
+    }
+
+    private fun toggleCall(on: Boolean) {
+        if (!on) { SmartAdaptive.setCallAware(this, false); refreshSmart(); return }
+        if (SmartAdaptive.hasPhonePermission(this)) { SmartAdaptive.setCallAware(this, true); refreshSmart(); return }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Phone state")
+            .setMessage("To switch to Transparency during a phone call, Android requires the \"Phone\" permission so this app is told when a call starts and ends. " +
+                "It does not read your calls, numbers or contacts, and never opens a microphone. It sees ordinary phone calls, not app calls.")
+            .setPositiveButton("Continue") { _, _ -> requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE), REQ_PHONE) }
+            .setNegativeButton("Cancel") { _, _ -> refreshSmart() }
+            .setOnCancelListener { refreshSmart() }
+            .show()
     }
 
     private fun pushEq(g: List<Double>) {
@@ -219,6 +369,8 @@ class SetupActivity : Activity() {
             })
         }
         // the service writes its status a moment after it starts
+        val hr = EqModel.headroomDb(this)
+        eqHeadroom.text = "Headroom " + (if (hr == 0.0) "0" else "%.1f".format(hr)) + " dB (a limiter catches the rest)"
         eqStatus.text = if (EqModel.enabled(this)) EqService.status(this) else "Off"
         eqStatus.postDelayed({ if (EqModel.enabled(this)) eqStatus.text = EqService.status(this) }, 1200)
     }
@@ -246,22 +398,29 @@ class SetupActivity : Activity() {
         apBox.visibility = if (ap != null) View.VISIBLE else View.GONE
         if (ap != null) {
             if (!ap.isNull("adaptive_level")) apLevel.progress = 100 - ap.optInt("adaptive_level")
+            apLevelText.text = "Adaptive level: blocks ${100 - apLevel.progress}%"
             for ((k, sw) in apSwitches) {
                 sw.isChecked = ap.optBoolean(k, false)
                 sw.alpha = if (ap.isNull(k)) 0.5f else 1f
+                val base = switchTitles.getValue(k)
+                sw.text = if (onPhone && PhoneDirect.fromApp(k) && !ap.isNull(k)) "$base (last set from this app)" else base
             }
             phModes = ap.optJSONArray("press_hold_modes")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
             colorPh(phDraft ?: phModes)
             apNote.text = (if (onPhone) "Talking to the AirPods directly from this phone." else "Through the laptop panel.") +
-                " Dim = unknown: ear detection, \"Off\" and press-and-hold aren't reported by the AirPods."
+                " Dim = never set. The AirPods never report ear detection, \"Off\" in press and hold, or the press-and-hold modes, " +
+                "so those show what this app last set."
         }
         crBox.visibility = if (cr != null) View.VISIBLE else View.GONE
         if (cr != null) {
             crBassOn.visibility = if (cr.has("bass_on")) View.VISIBLE else View.GONE
             crBassOn.isChecked = cr.optBoolean("bass_on")
             val x = cr.optJSONObject("extras") ?: JSONObject()
-            crTlRow.visibility = if (x.has("transparency_level")) View.VISIBLE else View.GONE
-            crTl.progress = x.optInt("transparency_level")
+            // no transparency level / ANC strength on this firmware (those commands answer ERROR)
+            crFeat.text = x.optJSONArray("features")?.let { a ->
+                "Firmware features (read-only): " + (0 until a.length()).joinToString(", ") {
+                    a.getJSONObject(it).let { f -> f.getString("name") + (if (f.optBoolean("enabled")) " on" else " off") } }
+            } ?: ""
             for ((k, sw) in crSwitches) {
                 sw.visibility = if (x.has(k)) View.VISIBLE else View.GONE
                 sw.isChecked = x.optBoolean(k)
@@ -285,6 +444,63 @@ class SetupActivity : Activity() {
                 }
             }
             r.exceptionOrNull()?.let { toast("AirPods: ${it.message}") }
+            loadControls()
+        }
+    }
+
+    private fun setPressHold(modes: List<String>) {
+        val app = applicationContext
+        io.execute {
+            val r = runCatching {
+                if (Handoff.local(app)) PhoneDirect.setPressHold(app, modes)
+                else {
+                    if ("off" in modes) HeadphonesWidget.post(app, "/api/airpods/setting",
+                        JSONObject().put("name", "allow_off").put("value", true).toString())
+                    HeadphonesWidget.post(app, "/api/airpods/setting",
+                        JSONObject().put("name", "press_hold_modes").put("value", JSONArray(modes)).toString())
+                }
+            }
+            r.exceptionOrNull()?.let { toast("AirPods: ${it.message}") }
+            loadControls()
+        }
+    }
+
+    /** Raw AAP level (100 = blocks the most) and Adaptive mode, in one go. */
+    private fun setAdaptive(level: Int) {
+        val app = applicationContext
+        io.execute {
+            val r = runCatching {
+                if (Handoff.local(app)) PhoneDirect.setAdaptive(app, level)
+                else {
+                    HeadphonesWidget.post(app, "/api/airpods/setting",
+                        JSONObject().put("name", "adaptive_level").put("value", level).toString())
+                    HeadphonesWidget.post(app, "/api/airpods/mode", "adaptive")
+                }
+            }
+            r.exceptionOrNull()?.let { toast("AirPods: ${it.message}") }
+            loadControls()
+        }
+    }
+
+    private fun setApMode(mode: String) {
+        val app = applicationContext
+        io.execute {
+            val r = runCatching {
+                if (Handoff.local(app)) PhoneDirect.setMode(app, mode)
+                else HeadphonesWidget.post(app, "/api/airpods/mode", mode)
+            }
+            r.exceptionOrNull()?.let { toast("AirPods: ${it.message}") }
+            loadControls()
+        }
+    }
+
+    /** Reopens the AAP link (not Bluetooth) so the AirPods report their settings again. */
+    private fun readBack() {
+        val app = applicationContext
+        io.execute {
+            if (!Handoff.local(app)) { toast("Only works while the AirPods are on this phone"); return@execute }
+            val r = runCatching { PhoneDirect.readBack(app) }
+            toast(if (r.isSuccess) "Read back from the AirPods" else "AirPods: ${r.exceptionOrNull()?.message}")
             loadControls()
         }
     }

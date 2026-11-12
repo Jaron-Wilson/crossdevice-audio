@@ -134,8 +134,10 @@ class EqService : Service() {
                             EqModel.responseDb(bands, g, centre).toFloat()))
                     }
                     fx.effect.setPreEqAllChannelsTo(eq)
-                    fx.effect.setInputGainAllChannelsTo(EqModel.preamp(g).toFloat())
-                    fx.effect.setLimiterAllChannelsTo(DynamicsProcessing.Limiter(true, true, 0, 1f, 60f, 10f, -1f, 0f))
+                    fx.effect.setInputGainAllChannelsTo(EqModel.preamp(bands, g).toFloat())
+                    // limiter stage: catches the peaks the half-cut preamp leaves (attack 1 ms, release 60 ms,
+                    // ratio 20:1, threshold -1 dBFS) so boosts don't clip
+                    fx.effect.setLimiterAllChannelsTo(DynamicsProcessing.Limiter(true, true, 0, 1f, 60f, 20f, -1f, 0f))
                     fx.effect.enabled = true
                 }
                 is Fx.Eq -> {

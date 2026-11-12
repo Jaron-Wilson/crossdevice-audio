@@ -19,8 +19,8 @@ android {
         applicationId = "dev.jaronwilson.headphones"
         minSdk = 31
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.1.0"
+        versionCode = 11
+        versionName = "1.2.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -49,4 +49,7 @@ dependencies {
     // Lets a normal (non-root) app reach Android's hidden classic-L2CAP socket, the same way
     // LibrePods does on phones whose Bluetooth stack allows it.
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
+    // Activity Recognition Transition API for Smart adaptive (phone sensors, no mic)
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    testImplementation("junit:junit:4.13.2")
 }

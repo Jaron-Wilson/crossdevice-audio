@@ -117,10 +117,11 @@ object CrusherDirect {
         return replies
     }
 
-    // Extras found in Skull-iQ's AT code (generic Bragi AT commands). Not every firmware answers them,
-    // so they're read once per connection and only shown if they replied OK. Same as the laptop panel.
-    private val EXTRA_Q = linkedMapOf("transparency_level" to "AT.UIAUDIO=transparency",
-        "at_on_call" to "AT.UIAUDIO=atoncall", "at_on_pause" to "AT.UIAUDIO=atonpause")
+    // Extras found in Skull-iQ's AT code (generic Bragi AT commands). Probed live on this firmware:
+    // AT.UIAUDIO=transparency|atoncall|atonpause answer with on/off ONLY (there is no transparency
+    // level, and anc_filter / samplingrate / AT.VOLUME? / AT.FEATURE=enable are ERROR), so no level
+    // control exists and we never send commands we have not seen answered. Read once per connection.
+    private val EXTRA_Q = linkedMapOf("at_on_call" to "AT.UIAUDIO=atoncall", "at_on_pause" to "AT.UIAUDIO=atonpause")
     @Volatile private var extras: JSONObject? = null
 
     private fun answered(r: String) = r.contains("OK") && !r.contains("ERROR")
@@ -132,18 +133,28 @@ object CrusherDirect {
         val out = JSONObject()
         for ((k, r) in EXTRA_Q.keys.zip(replies)) {
             if (!answered(r)) continue
-            if (k == "transparency_level") Regex(":\\s*(?:on|off)?\\s*,\\s*(\\d+)").find(r)?.let { out.put(k, it.groupValues[1].toInt()) }
-            else Regex(":\\s*(on|off)").find(r)?.let { out.put(k, it.groupValues[1] == "on") }
+            Regex(":\\s*(on|off)").find(r)?.let { out.put(k, it.groupValues[1] == "on") }
+        }
+        // read-only feature flags: AT.FEATURE=count, then AT.FEATURE=info,0,<count> ("name,id,policy,x,enabled|disabled")
+        runCatching {
+            val cnt = Regex("(\\d+)").find(sessionEach(context, listOf("AT.FEATURE=count"), read = true).first())
+                ?.groupValues?.get(1)?.toInt() ?: 0
+            if (cnt > 0) {
+                val r = sessionEach(context, listOf("AT.FEATURE=info,0,${minOf(16, cnt)}"), read = true).first()
+                val arr = org.json.JSONArray()
+                for (m in Regex("\\.FEATURE:\\s*([^,|\\r\\n]+),([^,]+),[^,]*,[^,]*,(enabled|disabled)").findAll(r))
+                    arr.put(JSONObject().put("name", m.groupValues[1].trim()).put("enabled", m.groupValues[3] == "enabled"))
+                if (arr.length() > 0) out.put("features", arr)
+            }
         }
         extras = out
         return out
     }
 
-    /** Set "bass_on" (Boolean), "transparency_level" (0-100), "at_on_call" / "at_on_pause" (Boolean). */
+    /** Set "bass_on", "at_on_call" or "at_on_pause" (Boolean). */
     fun setSetting(context: Context, name: String, value: Any) {
         val cmd = when (name) {
             "bass_on" -> "AT.CRUSHER=state," + (if (value == true) "on" else "off")
-            "transparency_level" -> "AT.UIAUDIO=transparency,," + (value as Number).toInt().coerceIn(0, 100)
             "at_on_call" -> "AT.UIAUDIO=atoncall," + (if (value == true) "on" else "off")
             "at_on_pause" -> "AT.UIAUDIO=atonpause," + (if (value == true) "on" else "off")
             else -> error("Unknown Crusher setting $name")

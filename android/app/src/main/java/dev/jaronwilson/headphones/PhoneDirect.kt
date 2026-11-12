@@ -88,6 +88,11 @@ object PhoneDirect {
         "allow_off" to (0x34 to "bool"),
         "one_bud_anc" to (0x1B to "bool"),
     )
+    /** Not echoed back on this link: 0x1A, 0x34 and 0x0A are never reported at all, and 0x2E is applied
+     *  silently and only re-reported when the AAP link reopens (checked live). The app remembers what it
+     *  last set for these and shows them as "last set from this app". */
+    val NO_ECHO = setOf(0x1A, 0x34, 0x0A, 0x2E)
+    val NEVER_REPORTED = linkedSetOf("press_hold_modes", "allow_off", "ear_detection")
     val MASK_BITS = linkedMapOf("off" to 1, "anc" to 2, "transparency" to 4, "adaptive" to 8)
 
     /** The data byte for a setting value (a Boolean, an Int 0-100, or a List of mode names). */
@@ -117,7 +122,7 @@ object PhoneDirect {
      * Returns the mode the AirPods report, or null if they said nothing in time.
      */
     private fun session(context: Context, setTo: String?, listenMs: Long,
-                        control: Pair<Int, Int>? = null): String? {
+                        controls: List<Pair<Int, Int>> = emptyList()): String? {
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: error("no Bluetooth")
         val mac = Config.airpodsMac(context).ifEmpty { error("Pick your AirPods in the Headphones app") }
         val sock = socket(adapter.getRemoteDevice(mac))
@@ -150,19 +155,26 @@ object PhoneDirect {
                 Thread.sleep(150)
                 out.write(hex("0400040009000D") + byteArrayOf(MODE.getValue(setTo).toByte(), 0, 0, 0)); out.flush()
             }
-            if (control != null) {
+            for (c in controls) {
                 Thread.sleep(150)
-                out.write(hex("040004000900") + byteArrayOf(control.first.toByte(), control.second.toByte(), 0, 0, 0)); out.flush()
+                out.write(hex("040004000900") + byteArrayOf(c.first.toByte(), c.second.toByte(), 0, 0, 0)); out.flush()
             }
+            // Settings the AirPods never echo (see NO_ECHO) can't be confirmed; give the bytes a moment to
+            // leave before the link closes. The rest are confirmed by the AirPods repeating them.
+            val echoed = controls.filter { it.first !in NO_ECHO }
             val start = System.currentTimeMillis()
             val deadline = start + listenMs
             while (System.currentTimeMillis() < deadline) {
                 // a set is confirmed once the AirPods echo it; a plain read waits for the settings burst
                 val modeOk = seen != null && (setTo == null || seen == setTo)
-                val ctlOk = if (control != null) ctl[control.first] == control.second
-                            else ctl.size >= 3 && System.currentTimeMillis() - start > 600
+                val now = System.currentTimeMillis()
+                val ctlOk = when {
+                    controls.isEmpty() -> ctl.size >= 3 && now - start > 600
+                    echoed.isEmpty() -> now - start > 500
+                    else -> echoed.all { ctl[it.first] == it.second }
+                }
                 if (modeOk && ctlOk) break
-                if (control != null && ctlOk) break
+                if (controls.isNotEmpty() && setTo == null && ctlOk) break
                 Thread.sleep(50)
             }
             runCatching { sock.close() }
@@ -203,18 +215,48 @@ object PhoneDirect {
     }
 
     /** Change one AirPods setting straight from the phone. Throws with a readable reason on failure. */
-    fun setSetting(context: Context, name: String, value: Any?) {
-        val id = SETTINGS[name]?.first ?: error("unknown setting $name")
-        val b = encode(name, value)
+    fun setSetting(context: Context, name: String, value: Any?) =
+        setSettings(context, listOf(name to value))
+
+    /** Several settings in one AAP session, in order (e.g. allow-off before the press-and-hold modes). */
+    fun setSettings(context: Context, items: List<Pair<String, Any?>>, mode: String? = null) {
+        val ctls = items.map { (name, value) -> (SETTINGS[name]?.first ?: error("unknown setting $name")) to encode(name, value) }
         try {
-            session(context, null, 1500, id to b)
+            session(context, mode, 1500, ctls)
             remember(context, "ok", "")
-            rememberCtl(context, mapOf(id to b))
+            rememberCtl(context, ctls.toMap())
+            if (mode != null) rememberMode(context, mode)
         } catch (e: Throwable) {
             val why = (e.cause ?: e).let { it.message ?: it.javaClass.simpleName }
             remember(context, "fail", why)
             throw RuntimeException(why)
         }
+    }
+
+    /** Press-and-hold cycle: sent once, with "allow off" first when Off is among the modes. */
+    fun setPressHold(context: Context, modes: List<String>) {
+        val items = mutableListOf<Pair<String, Any?>>()
+        if ("off" in modes) items += "allow_off" to true
+        items += "press_hold_modes" to modes
+        setSettings(context, items)
+    }
+
+    /** Block-noise slider: [level] is the raw AAP level (100 blocks the most, 0 hears the most). Also
+     *  selects Adaptive mode, like Apple's own slider. */
+    fun setAdaptive(context: Context, level: Int) =
+        setSettings(context, listOf("adaptive_level" to level), mode = "adaptive")
+
+    /** True for a setting the AirPods never report: what the UI shows is the last value set from this app. */
+    fun fromApp(name: String) = name in NEVER_REPORTED
+
+    /** Reconnect the AAP L2CAP link (not Bluetooth itself) so the AirPods report their settings again. */
+    fun readBack(context: Context): JSONObject {
+        runCatching { session(context, null, 2500) }.onSuccess { rememberMode(context, it) }.onFailure { e ->
+            val why = (e.cause ?: e).let { it.message ?: it.javaClass.simpleName }
+            remember(context, "fail", why); throw RuntimeException(why)
+        }
+        remember(context, "ok", "")
+        return settings(context, Long.MAX_VALUE)
     }
 
     /** Set the noise mode straight from the phone. Throws with a readable reason on failure. */
