@@ -265,6 +265,8 @@ class AirPods(threading.Thread):
         self.mode=None; self.battery={}; self.online=False; self.ctl={}
         self.ear=None        # (primary, secondary): 0 in ear, 1 out of ear, 2 in case (AAP 0x06)
         self.speaking=None   # (level, time) from Conversation Awareness (AAP 0x4B)
+        self.on_head=None    # callback(rate, dt) while head tracking runs
+        self.head_on=False; self.head_n=0; self.head_t=0.0
         self.echo={}     # id -> time the AirPods last sent that setting (a report or the echo of a change)
         self.wake = threading.Event(); self.fast = False
         try: self.phone = open(HANDOFF_FILE).read().strip() == "phone"
@@ -280,7 +282,33 @@ class AirPods(threading.Thread):
                     except OSError: pass
             subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
         self.wake.set()
+    # Head tracking (AAP opcode 0x17), packets as LibrePods sends them (its default "alternate" pair,
+    # bluetooth/AACPManager.kt). Data: >60 bytes, prefix 04000400 1700 0000 1000, byte 10 0x44/0x45.
+    HT_START=bytes.fromhex("040004001700000010000F000873420B081010021A0501409C0000")
+    HT_STOP=bytes.fromhex("040004001700000010000F000875420B081010021A050100000000")
+    def head_tracking(self, on):
+        """Start/stop the AirPods' head-orientation stream (stop it when unused: battery)."""
+        self.head_on=bool(on); self.head_t=0.0
+        return self.send(self.HT_START if on else self.HT_STOP)
+    def _head(self,p):
+        """Head-tracking packet. Checked live (AirPods Pro 2): int16 LE at 43/45/47 is a vector of
+        constant length (~29000, gravity-like), 49/51/53 are small rates that jump when the head
+        moves (gyro). LibrePods turns 45/47 into "yaw" but that vector can't see turns about the
+        vertical, so the panel integrates the rotation rate about it instead (scale calibrated by the
+        user, see hp_spatial.Spatial.calibrate)."""
+        i16=lambda k:int.from_bytes(p[k:k+2],"little",signed=True)
+        g=[i16(43),i16(45),i16(47)]; w=[i16(49),i16(51),i16(53)]
+        n=sum(x*x for x in g)**0.5 or 1.0
+        rate=sum(a*b for a,b in zip(w,g))/n          # rotation rate about the vertical, raw units
+        now=time.time(); dt=min(0.1,now-self.head_t) if self.head_t else 0.0; self.head_t=now
+        self.head_n+=1
+        cb=self.on_head
+        if cb and dt:
+            try: cb(rate,dt)
+            except Exception: pass
     def _parse(self,p):
+        if len(p)>60 and p[:10]==bytes.fromhex("04000400170000001000") and p[10] in (0x44,0x45) and p[11]==0:
+            return self._head(p)
         if p[:6]==bytes.fromhex("040004000600") and len(p)>=8:
             self.ear=(p[6],p[7]); raw_log("<", p)
         if p[:6]==bytes.fromhex("040004004b00") and len(p)>=10:
@@ -307,6 +335,8 @@ class AirPods(threading.Thread):
                 s.sendall(HS); time.sleep(0.3); s.sendall(FEAT); time.sleep(0.2); s.sendall(NOTIFY)
                 with self.lock: self.sock=s
                 self.online=True; s.settimeout(2)
+                if self.head_on:                    # spatial audio was tracking: resume the stream
+                    self.head_t=0.0; time.sleep(0.3); s.sendall(self.HT_START)
                 while not self.phone:
                     try:
                         p=s.recv(1024)
@@ -449,6 +479,37 @@ def _output_target():
     return dev, (hp_eq.smart_target(dev) if dev else None)
 if NOTCH and EQ:
     NOTCH["output"].output_target = _output_target
+# ---- Spatial audio (HRTF virtual speakers, optional head tracking), see hp_spatial.py ----
+SPATIAL_FILE = os.path.expanduser("~/.config/headphone-panel/spatial.json")
+try:
+    import hp_spatial
+    SPATIAL = hp_spatial.Spatial(AP)
+    SPATIAL.output_target = _output_target
+    AP.on_head = SPATIAL.head
+except Exception as e:
+    SPATIAL = None; SPATIAL_ERR = str(e)
+def spatial_save():
+    try:
+        with open(SPATIAL_FILE, "w") as f:
+            json.dump({"mode": SPATIAL.mode, "deg_per_unit": SPATIAL.deg_per_unit}, f)
+    except OSError: pass
+def spatial_set(mode):
+    st = SPATIAL.set_mode(mode)
+    spatial_save()
+    return st
+def spatial_restore():
+    time.sleep(4)
+    try: saved = json.load(open(SPATIAL_FILE))
+    except (OSError, ValueError): saved = {}
+    mode = saved.get("mode", "off")
+    if SPATIAL and saved.get("deg_per_unit"): SPATIAL.deg_per_unit = float(saved["deg_per_unit"])
+    if SPATIAL and mode != "off":
+        try: SPATIAL.set_mode(mode)
+        except Exception as e: SPATIAL.error = str(e)
+threading.Thread(target=spatial_restore, daemon=True).start()
+def spatial_state():
+    if not SPATIAL: return {"available": False, "error": SPATIAL_ERR}
+    return {"available": True, **SPATIAL.state()}
 def audio_tick():
     """Every few seconds: EQ attached, default output on a real device, and the default input never the
     AirPods mic (an app opening it would switch them to call mode)."""
@@ -460,6 +521,9 @@ def audio_tick():
         except Exception: pass
     if "output" in NOTCH:
         try: NOTCH["output"].check_target()
+        except Exception: pass
+    if SPATIAL:
+        try: SPATIAL.check_target()
         except Exception: pass
 def notch_restore():
     time.sleep(3)
@@ -508,7 +572,10 @@ class H(BaseHTTPRequestHandler):
             return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online,
                                            "eq":bool(EQ and EQ.available())}))
         if self.path=="/api/state":
-            return self._s(200,json.dumps({"crusher":crusher_state(),"airpods":AP.state(),"eq":eq_state()}))
+            return self._s(200,json.dumps({"crusher":crusher_state(),"airpods":AP.state(),"eq":eq_state(),
+                                           "spatial":spatial_state()}))
+        if self.path=="/api/spatial":
+            return self._s(200,json.dumps(spatial_state()))
         if self.path=="/api/eq":
             return self._s(200,json.dumps(eq_state()))
         self._s(404,"{}")
@@ -557,6 +624,16 @@ class H(BaseHTTPRequestHandler):
                 j=json.loads(body or "{}")
                 if j.get("kind") not in NOTCH: return self._s(400,json.dumps({"error":"kind must be mic or output"}))
                 return self._s(200,json.dumps(NOTCH[j["kind"]].set(j.get("freqs") or [], hum=bool(j.get("hum")))))
+            if self.path=="/api/spatial":
+                if not SPATIAL: return self._s(503,json.dumps({"error":SPATIAL_ERR}))
+                return self._s(200,json.dumps({"available":True,**spatial_set(json.loads(body or "{}").get("mode","off"))}))
+            if self.path=="/api/spatial/calibrate":
+                if not SPATIAL: return self._s(503,json.dumps({"error":SPATIAL_ERR}))
+                r=SPATIAL.calibrate(json.loads(body or "{}").get("step","start")); spatial_save()
+                return self._s(200,json.dumps({**spatial_state(),"calibration":r}))
+            if self.path=="/api/spatial/recenter":
+                if SPATIAL: SPATIAL.recenter()
+                return self._s(200,json.dumps(spatial_state()))
             if self.path=="/api/airpods/block":
                 j=json.loads(body or "{}")
                 mode=j.get("mode","adaptive")
@@ -579,6 +656,7 @@ if __name__=="__main__":
     def cleanup():
         if SOUND: SOUND.stop(wait=True)
         for n in NOTCH.values(): n.shutdown()
+        if SPATIAL: SPATIAL.shutdown()
         if EQ: EQ.shutdown()      # put the real headphones back as the default output
     def bye(*_):
         cleanup(); sys.exit(0)

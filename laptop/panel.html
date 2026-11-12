@@ -86,6 +86,15 @@ select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:
   <div class=note id=eq_note>Drag the dots up or down. AirPods have no EQ of their own, so it's applied to the audio before it's sent.</div>
  </div>
 </div>
+<div id=spcard class=off>
+ <div class=dev>Spatial audio (optional, this laptop)</div>
+ <div class=card>
+  <div class=seg id=sp_modes><button data-m=off>Off</button><button data-m=fixed>Fixed</button><button data-m=tracked>Head tracked</button></div>
+  <div class=row style="margin-top:10px;align-items:center"><canvas id=sphead width=160 height=160 style="width:110px;height:110px;flex:none"></canvas>
+   <div><div class=note id=sp_st style="margin-top:0"></div><span id=sp_tr><button class=small onclick="spRecenter()" style="margin-top:6px">Recenter</button> <button class=small id=sp_cal onclick="spCal()" style="margin-top:6px">Calibrate</button></span></div></div>
+  <div class=note>Plays stereo as two virtual speakers in front of you (HRTF on this laptop, before the audio is sent). Head tracked (experimental): turning your head keeps the speakers in place, using the AirPods' motion sensors; the front slowly follows where you look. Calibrate once: press it, turn your head 90° to the right, press Done. Off by default; head tracking stops when you switch it off.</div>
+ </div>
+</div>
 <details id=sndcard class=off style="margin-top:22px"><summary class=dev style="cursor:pointer">Laptop mic tools (optional)</summary>
  <div class=card>
   <div class=note style="margin-top:0">Uses the <b>laptop's</b> microphone, not the AirPods, and changes nothing on the AirPods. For finding a hum or whine and notching it out of calls/recordings made on this laptop, or out of what this laptop plays.</div>
@@ -179,6 +188,7 @@ async function load(){let s=await (await fetch('/api/state')).json();S=s;
  renderPh();
  let bt=a.battery||{},parts=[];for(const k of ['left','right','case'])if(bt[k])parts.push(k[0].toUpperCase()+' '+bt[k].level+'%');
  ap_batt.textContent=parts.join('  ');
+ if(s.spatial&&SP.mode!='tracked'){SP=s.spatial;renderSp();}
  if(s.eq&&drag<0){EQ=s.eq;if(EQ.gains)gains=EQ.gains.slice();renderEq();}
  $('none').className=(c.online||a.online)?'off':'';}
 for(const k of['conversational_awareness','personalized_volume','ear_detection','one_bud_anc','allow_off'])
@@ -243,7 +253,7 @@ function sndToggle(){if(ES){sndStop('');post('/api/sound/stop','');return;}
  ES.onmessage=e=>{const j=JSON.parse(e.data);if(j.bins)frame(j.bins);else if(j.error)sndStop('Stopped: '+j.error);};
  ES.addEventListener('end',()=>sndStop(''));
  ES.onerror=()=>sndStop('Stopped.');}
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&ES){sndStop('');post('/api/sound/stop','');}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&ES){sndStop('');post('/api/sound/stop','');}if(!document.hidden&&SP.mode=='tracked')renderSp();});
 function cx(e){const r=spec.getBoundingClientRect();return Math.max(0,Math.min(SW,(e.clientX-r.left)/r.width*SW));}
 spec.addEventListener('pointerdown',e=>{selX0=cx(e);spec.setPointerCapture(e.pointerId);});
 spec.addEventListener('pointermove',e=>{if(selX0==null)return;const a=Math.min(selX0,cx(e)),b=Math.max(selX0,cx(e));if(b-a>3)sel=[xf(a),xf(b)];});
@@ -259,6 +269,23 @@ async function inspect(){if(!sel)return;if(!ES){$('snd_warn').textContent='Press
 async function notch(kind){if(!PK)return;const f=PK.peak_hz,fs=$('pk_harm').checked?[f,2*f,3*f].filter(x=>x<11000):[f];
  const r=await post('/api/sound/notch',JSON.stringify({kind,freqs:fs,hum:/hum/.test(PK.label)}));if(r.ok){sndLoad();setTimeout(sndLoad,6000);}}
 async function notchOff(kind){await post('/api/sound/notch',JSON.stringify({kind,freqs:[]}));sndLoad();}
+// ---- spatial ----
+let SP={},spT=null;
+document.querySelectorAll('#sp_modes button').forEach(b=>b.onclick=async()=>{const r=await post('/api/spatial',JSON.stringify({mode:b.dataset.m}));if(r.ok){SP=await r.json();renderSp();}});
+async function spCal(){const step=SP.calibrating?'done':'start';const j=await (await fetch('/api/spatial/calibrate',{method:'POST',body:JSON.stringify({step})})).json();SP=j;renderSp();$('sp_st').textContent=j.calibration.text;}
+async function spRecenter(){SP=await (await fetch('/api/spatial/recenter',{method:'POST'})).json();renderSp();}
+function renderSp(){$('spcard').className=SP.available?'':'off';
+ document.querySelectorAll('#sp_modes button').forEach(b=>b.className=SP.mode==b.dataset.m?'on':'');
+ $('sp_tr').style.display=SP.mode=='tracked'?'':'none';$('sp_cal').textContent=SP.calibrating?'Done':'Calibrate';
+ $('sp_st').textContent=SP.error?SP.error:SP.mode=='off'?'Off':SP.mode=='fixed'?`Fixed speakers (HRTF ${SP.hrtf})`:
+  SP.calibrating?'Calibrating: turn your head 90° right, then press Done.':(SP.samples?`Head ${SP.yaw>0?'right':'left'} ${Math.abs(SP.yaw).toFixed(0)}° from the front`:'Waiting for head tracking from the AirPods...');
+ const c=$('sphead'),g=c.getContext('2d'),W=c.width,H=c.height,cx=W/2,cy=H/2+8;g.clearRect(0,0,W,H);
+ const on=SP.mode&&SP.mode!='off',yaw=SP.mode=='tracked'?SP.yaw*Math.PI/180:0;
+ for(const a of[-30,30]){const t=a*Math.PI/180,x=cx+Math.sin(t)*62,y=cy-Math.cos(t)*62;g.fillStyle=on?'#5fd0ff':'#33415a';g.fillRect(x-7,y-7,14,14);}
+ g.save();g.translate(cx,cy);g.rotate(yaw);g.fillStyle='#273345';g.strokeStyle=on?'#e8edf2':'#56708a';g.lineWidth=3;
+ g.beginPath();g.arc(0,0,22,0,7);g.fill();g.stroke();g.beginPath();g.moveTo(-7,-21);g.lineTo(0,-33);g.lineTo(7,-21);g.stroke();
+ g.fillStyle=on?'#e8edf2':'#56708a';g.fillRect(-27,-6,5,12);g.fillRect(22,-6,5,12);g.restore();
+ clearTimeout(spT);if(SP.mode=='tracked'&&!document.hidden)spT=setTimeout(async()=>{try{SP=await (await fetch('/api/spatial')).json();}catch(e){}renderSp();},120);}
 grid();sndLoad();
 load();setInterval(load,4000);
 </script>
