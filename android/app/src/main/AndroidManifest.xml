@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- to notice the AirPods connecting to this phone (hand-off with the laptop) -->
@@ -16,6 +17,15 @@
     <!-- optional sub-option only (call -> transparency); requested at runtime only if you turn it on -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Live Translation: the AirPods' mics (only while you have it on), as a microphone foreground service -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- package visibility: the phone's speech recognizer and text-to-speech engine -->
+    <queries>
+        <intent><action android:name="android.speech.RecognitionService" /></intent>
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+    </queries>
 
     <application
         android:label="Headphones"
@@ -32,6 +42,30 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Live Translation screen (the widget's Translate button opens it with a toggle) -->
+        <activity
+            android:name=".TranslateActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Live Translation: holds the AirPods' mic (Bluetooth SCO) while a session runs -->
+        <service
+            android:name=".LiveTranslateService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- No analytics: ML Kit ships Google's event-logging backend (Firebase "CCT" transport). Removing
+             its registration means the transport has no backend and drops those events on the phone. -->
+        <service
+            android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="backend:com.google.android.datatransport.cct.CctBackendFactory"
+                tools:node="remove" />
+        </service>
 
         <!-- ACL connect/disconnect are exempt from the implicit-broadcast ban -->
         <receiver

@@ -19,8 +19,10 @@ android {
         applicationId = "dev.jaronwilson.headphones"
         minSdk = 31
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.2.0"
+        versionCode = 12
+        versionName = "1.3.0"
+        // ML Kit's translate/language-id native libraries are large; Android 12+ phones are 64-bit ARM
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -51,5 +53,8 @@ dependencies {
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     // Activity Recognition Transition API for Smart adaptive (phone sensors, no mic)
     implementation("com.google.android.gms:play-services-location:21.3.0")
+    // Live Translation, all on-device: translation models (downloaded per language) and language ID (bundled)
+    implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:language-id:17.0.6")
     testImplementation("junit:junit:4.13.2")
 }

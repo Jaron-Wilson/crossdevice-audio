@@ -52,5 +52,6 @@
             android:layout_height="match_parent" android:scaleType="fitXY" android:padding="4dp"
             android:contentDescription="EQ curve" />
         <TextView android:id="@+id/eq_btn" style="@style/Btn" android:text="EQ" />
+        <TextView android:id="@+id/tr_btn" style="@style/Btn" android:text="Translate" />
     </LinearLayout>
 </LinearLayout>

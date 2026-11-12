@@ -135,6 +135,41 @@ the AirPods between Adaptive levels as you walk, drive or sit still.
 
 All three use `shared/eq_presets.json`, so a preset sounds the same everywhere.
 
+## Live Translation (Android 1.3.0)
+
+A conversation translator that runs through the AirPods and stays on the phone. Start it from the app's
+**Live Translation** button or the widget's **Translate** button. While it runs there is an ongoing
+notification with **Stop**.
+
+- **Their speech, in your ears.** The AirPods' microphones hear the other person. The phone recognizes the
+  speech, translates it and speaks it to you in the AirPods.
+- **Your speech, for them.** When you speak your own language (English by default), the translation is shown
+  big on the screen (there is also a full-screen view) and spoken on the phone's own speaker.
+- **Who spoke** is decided by ML Kit Language ID on each phrase, with the recognizer's language as the
+  tie-break. *Hold while you talk* on the screen marks a phrase as yours if detection gets it wrong.
+- **Noise control (optional).** By default the AirPods switch to noise cancelling for the session (or
+  *Adaptive, block max*) so the original voice is quieter. The previous mode, and the adaptive level, are put
+  back when you stop.
+- **On-device only.** Uses the platform's on-device speech recognizer, falling back to the phone's default
+  recognizer with "prefer offline" set if the on-device one lacks the language. Translation is ML Kit. Each
+  language model is about 30 MB and downloads over Wi-Fi only. You can delete models from the same screen. ML Kit's
+  usage-logging backend is removed from the app's manifest. The transcript is kept in memory, and is written
+  to a file only when you tap **Save**.
+
+How the audio is routed:
+- During a session the app uses `MODE_IN_COMMUNICATION` and sets the AirPods (Bluetooth SCO) as the
+  communication device with `setCommunicationDevice`. Their microphones then feed the recognizer, and
+  voice-communication audio (the translation for you) plays in them. On stop it calls `clearCommunicationDevice`
+  and returns to `MODE_NORMAL`, so music goes back to A2DP quality. Music is paused for the session
+  (transient audio focus).
+- Your reply is synthesized to a file and played as media with `setPreferredDevice(built-in speaker)`. The app
+  checks where Android actually routed it. If the phone forces it to the AirPods anyway, the app switches
+  the communication device to the speaker for that reply and then back to the AirPods. That costs about a
+  second of mic time per reply.
+- Recognition pauses while anything is spoken, and phrases that repeat what was just spoken are dropped. This
+  stops the app from translating its own voice. It is half-duplex: speech that overlaps playback is missed.
+- Call audio over Bluetooth SCO is narrowband or wideband, so translations in the AirPods sound like a phone call.
+
 ## How it fits together
 
 ```mermaid
@@ -180,7 +215,7 @@ flowchart LR
 | `laptop/apple-did.sh` | Switches BlueZ to Apple's Device ID (and back with `undo`). |
 | `windows/crusher_win.py` | Crusher control on Windows with no driver: RFCOMM through Winsock `AF_BTH` via ctypes. |
 | `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, and the Windows connection check. |
-| `android/` | The home-screen widget app (Kotlin, no AndroidX). |
+| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`). |
 | `docs/HOW-IT-WORKS.md` | The multi-device findings, with the packets that prove them. |
 | `docs/PROTOCOL.md` | The Crusher AT commands, the AAP packets, the BLE battery format and the panel API. |
 

@@ -524,6 +524,13 @@ class SetupActivity : Activity() {
             setBackgroundColor(Color.parseColor("#0F1419"))
         }
         col.addView(label("Headphones", 24f, "#E8EDF2"))
+        col.addView(Button(this).apply {
+            text = "Live Translation"; isAllCaps = false; textSize = 20f; setTextColor(Color.WHITE)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#2F7D4F")); cornerRadius = dp(16).toFloat()
+            }
+            setOnClickListener { startActivity(Intent(this@SetupActivity, TranslateActivity::class.java)) }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, dp(72)).apply { bottomMargin = dp(6) })
         buildControls(col)
         col.addView(label("Setup", 15f, "#E8EDF2"))
         col.addView(label("Control your AirPods noise modes and see their battery from a home-screen widget. " +

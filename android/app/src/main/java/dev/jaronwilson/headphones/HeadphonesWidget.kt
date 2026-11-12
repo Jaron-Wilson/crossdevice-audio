@@ -265,6 +265,14 @@ class HeadphonesWidget : AppWidgetProvider() {
             v.setOnClickPendingIntent(R.id.eq_curve, PendingIntent.getActivity(context, R.id.eq_curve,
                 Intent(context, SetupActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
 
+            // Live Translation: opens the screen with "toggle" (Android only lets a visible app start the mic)
+            v.setTextViewText(R.id.tr_btn, if (LiveTranslate.running) "Stop translate" else "Translate")
+            v.setInt(R.id.tr_btn, "setBackgroundResource", if (LiveTranslate.running) R.drawable.btn_on else R.drawable.btn)
+            v.setOnClickPendingIntent(R.id.tr_btn, PendingIntent.getActivity(context, R.id.tr_btn,
+                Intent(context, TranslateActivity::class.java).setAction(TranslateActivity.ACTION_TOGGLE)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+
             val mgr = AppWidgetManager.getInstance(context)
             mgr.updateAppWidget(ComponentName(context, HeadphonesWidget::class.java), v)
         }
