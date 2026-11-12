@@ -6,6 +6,11 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- read the AirPods' battery broadcast on the phone itself (no location use) -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <!-- source-side EQ: audiofx effects held by a foreground service -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="Headphones"
@@ -33,6 +38,16 @@
                 <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
             </intent-filter>
         </receiver>
+
+        <!-- keeps the EQ effects alive while the app isn't on screen -->
+        <service
+            android:name=".EqService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user's audio equalizer attached to the phone's audio output" />
+        </service>
 
         <receiver
             android:name=".HeadphonesWidget"

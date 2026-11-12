@@ -19,14 +19,16 @@ android {
         applicationId = "dev.jaronwilson.headphones"
         minSdk = 31
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.0.3"
+        versionCode = 10
+        versionName = "1.1.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    // the EQ bands and presets: one shared file for the phone, the laptop panel and Windows
+    sourceSets["main"].assets.srcDir("../../shared")
     signingConfigs {
         if (hasReleaseKey) create("release") {
             storeFile = file(keystoreProps.getProperty("storeFile"))

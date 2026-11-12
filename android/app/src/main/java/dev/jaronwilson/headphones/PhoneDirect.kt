@@ -20,6 +20,9 @@ import java.util.concurrent.TimeUnit
  *    this phone's Bluetooth stack accepts the AirPods' channel (Android 16 QPR3+); Samsung on QPR2 may
  *    refuse, in which case we remember that and the widget hides the buttons.
  *  - battery from the AirPods' public BLE broadcast.
+ *  - AirPods settings (adaptive noise level, Conversational Awareness, ...) as AAP control commands
+ *    (04 00 04 00 09 00 <id> <4 bytes>, ids from LibrePods), read back from the values the AirPods
+ *    push after the notification request. Same names and encoding as the laptop panel.
  */
 object PhoneDirect {
     private const val PSM = 0x1001
@@ -75,16 +78,51 @@ object PhoneDirect {
     private val NOTIFY = hex("040004000F00FFFFFEFF")
     private val NAMES = mapOf(1 to "off", 2 to "anc", 3 to "transparency", 4 to "adaptive")
 
+    /** name -> (control id, kind). kind: "bool" (1 on / 2 off), "level" (0-100), "mask" (modes). */
+    val SETTINGS = linkedMapOf(
+        "adaptive_level" to (0x2E to "level"),          // 0 lets the most noise in, 100 filters the most
+        "conversational_awareness" to (0x28 to "bool"),
+        "personalized_volume" to (0x26 to "bool"),
+        "ear_detection" to (0x0A to "bool"),
+        "press_hold_modes" to (0x1A to "mask"),
+        "allow_off" to (0x34 to "bool"),
+        "one_bud_anc" to (0x1B to "bool"),
+    )
+    val MASK_BITS = linkedMapOf("off" to 1, "anc" to 2, "transparency" to 4, "adaptive" to 8)
+
+    /** The data byte for a setting value (a Boolean, an Int 0-100, or a List of mode names). */
+    fun encode(name: String, value: Any?): Int {
+        val (_, kind) = SETTINGS[name] ?: error("unknown setting $name")
+        return when (kind) {
+            "bool" -> if (value == true) 1 else 2
+            "level" -> (value as Number).toInt().coerceIn(0, 100)
+            else -> {
+                @Suppress("UNCHECKED_CAST")
+                val m = (value as List<String>).sumOf { MASK_BITS[it] ?: 0 }
+                require(Integer.bitCount(m) >= 2) { "Press and hold needs at least two modes" }
+                m
+            }
+        }
+    }
+
+    fun decode(kind: String, b: Int): Any? = when (kind) {
+        "bool" -> when (b) { 1 -> true; 2 -> false; else -> null }
+        "level" -> b
+        else -> MASK_BITS.filter { (b and it.value) != 0 }.keys.toList()
+    }
+
     /**
      * One short AAP session from the phone: handshake, ask for notifications, optionally set a mode,
      * then listen [listenMs] for the AirPods' noise-mode report (04 00 04 00 09 00 0D <mode>).
      * Returns the mode the AirPods report, or null if they said nothing in time.
      */
-    private fun session(context: Context, setTo: String?, listenMs: Long): String? {
+    private fun session(context: Context, setTo: String?, listenMs: Long,
+                        control: Pair<Int, Int>? = null): String? {
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: error("no Bluetooth")
         val mac = Config.airpodsMac(context).ifEmpty { error("Pick your AirPods in the Headphones app") }
         val sock = socket(adapter.getRemoteDevice(mac))
         var seen: String? = null
+        val ctl = java.util.concurrent.ConcurrentHashMap<Int, Int>()
         try {
             sock.connect()
             val out = sock.outputStream
@@ -95,8 +133,12 @@ object PhoneDirect {
                         val n = sock.inputStream.read(buf)
                         if (n <= 0) break
                         for (i in 0..n - 8) {
-                            if (buf[i] == 0x04.toByte() && buf[i + 4] == 0x09.toByte() && buf[i + 6] == 0x0D.toByte())
-                                NAMES[buf[i + 7].toInt()]?.let { seen = it }
+                            if (buf[i] == 0x04.toByte() && buf[i + 1] == 0.toByte() && buf[i + 2] == 0x04.toByte() &&
+                                buf[i + 3] == 0.toByte() && buf[i + 4] == 0x09.toByte() && buf[i + 5] == 0.toByte()) {
+                                val id = buf[i + 6].toInt() and 0xFF
+                                ctl[id] = buf[i + 7].toInt() and 0xFF
+                                if (id == 0x0D) NAMES[buf[i + 7].toInt()]?.let { seen = it }
+                            }
                         }
                     }
                 }
@@ -108,10 +150,19 @@ object PhoneDirect {
                 Thread.sleep(150)
                 out.write(hex("0400040009000D") + byteArrayOf(MODE.getValue(setTo).toByte(), 0, 0, 0)); out.flush()
             }
-            val deadline = System.currentTimeMillis() + listenMs
+            if (control != null) {
+                Thread.sleep(150)
+                out.write(hex("040004000900") + byteArrayOf(control.first.toByte(), control.second.toByte(), 0, 0, 0)); out.flush()
+            }
+            val start = System.currentTimeMillis()
+            val deadline = start + listenMs
             while (System.currentTimeMillis() < deadline) {
-                // a set is confirmed once the AirPods echo the new mode
-                if (seen != null && (setTo == null || seen == setTo)) break
+                // a set is confirmed once the AirPods echo it; a plain read waits for the settings burst
+                val modeOk = seen != null && (setTo == null || seen == setTo)
+                val ctlOk = if (control != null) ctl[control.first] == control.second
+                            else ctl.size >= 3 && System.currentTimeMillis() - start > 600
+                if (modeOk && ctlOk) break
+                if (control != null && ctlOk) break
                 Thread.sleep(50)
             }
             runCatching { sock.close() }
@@ -119,6 +170,7 @@ object PhoneDirect {
         } finally {
             runCatching { sock.close() }
         }
+        if (ctl.isNotEmpty()) rememberCtl(context, ctl)
         return seen
     }
 
@@ -126,6 +178,43 @@ object PhoneDirect {
 
     private fun rememberMode(context: Context, mode: String?) {
         if (mode != null) prefs(context).edit().putString("mode", mode).putLong("mode_t", System.currentTimeMillis()).apply()
+    }
+
+    private fun rememberCtl(context: Context, ctl: Map<Int, Int>) {
+        val saved = runCatching { JSONObject(prefs(context).getString("ctl", "{}")!!) }.getOrDefault(JSONObject())
+        for ((k, v) in ctl) saved.put(k.toString(), v)
+        prefs(context).edit().putString("ctl", saved.toString()).putLong("ctl_t", System.currentTimeMillis()).apply()
+    }
+
+    /** The AirPods' settings as last reported to the phone (re-read if older than [maxAgeMs]).
+     *  Same JSON shape as the laptop panel's airpods.settings; a missing value is JSON null. */
+    fun settings(context: Context, maxAgeMs: Long = 60_000): JSONObject {
+        val p = prefs(context)
+        if (System.currentTimeMillis() - p.getLong("ctl_t", 0) > maxAgeMs && status(context) != "fail")
+            runCatching { session(context, null, 2000) }.onSuccess { rememberMode(context, it) }
+        val ctl = runCatching { JSONObject(p.getString("ctl", "{}")!!) }.getOrDefault(JSONObject())
+        val out = JSONObject()
+        for ((name, spec) in SETTINGS) {
+            val raw = ctl.opt(spec.first.toString())
+            val v = if (raw is Number) decode(spec.second, raw.toInt()) else null
+            out.put(name, when (v) { null -> JSONObject.NULL; is List<*> -> org.json.JSONArray(v); else -> v })
+        }
+        return out
+    }
+
+    /** Change one AirPods setting straight from the phone. Throws with a readable reason on failure. */
+    fun setSetting(context: Context, name: String, value: Any?) {
+        val id = SETTINGS[name]?.first ?: error("unknown setting $name")
+        val b = encode(name, value)
+        try {
+            session(context, null, 1500, id to b)
+            remember(context, "ok", "")
+            rememberCtl(context, mapOf(id to b))
+        } catch (e: Throwable) {
+            val why = (e.cause ?: e).let { it.message ?: it.javaClass.simpleName }
+            remember(context, "fail", why)
+            throw RuntimeException(why)
+        }
     }
 
     /** Set the noise mode straight from the phone. Throws with a readable reason on failure. */
