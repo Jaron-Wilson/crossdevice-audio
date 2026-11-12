@@ -56,6 +56,9 @@ class SetupActivity : Activity() {
     private val apSwitches = LinkedHashMap<String, Switch>()
     private val phButtons = LinkedHashMap<String, Button>()
     private var phModes: List<String> = emptyList()
+    // The AirPods never report the press-and-hold modes (0x1A), so they start unknown: picks are kept
+    // here until there are two, then sent.
+    private var phDraft: List<String>? = null
     private lateinit var crBox: LinearLayout
     private lateinit var crBassOn: Switch
     private lateinit var crTl: SeekBar
@@ -157,8 +160,15 @@ class SetupActivity : Activity() {
             phButtons[k] = Button(this).apply {
                 text = t; isAllCaps = false
                 setOnClickListener {
-                    val next = if (k in phModes) phModes - k else phModes + k
-                    if (next.size < 2) toast("Keep at least two modes") else setAp("press_hold_modes", next)
+                    val cur = phDraft ?: phModes
+                    val next = if (k in cur) cur - k else cur + k
+                    if (next.size < 2) {
+                        phDraft = next; colorPh(next); toast("Pick at least two modes")
+                    } else {
+                        phDraft = null; phModes = next; colorPh(next)
+                        if ("off" in next && "off" !in cur) setAp("allow_off", true)
+                        setAp("press_hold_modes", next)
+                    }
                 }
             }.also { ph.addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)) }
         }
@@ -241,9 +251,9 @@ class SetupActivity : Activity() {
                 sw.alpha = if (ap.isNull(k)) 0.5f else 1f
             }
             phModes = ap.optJSONArray("press_hold_modes")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
-            for ((k, b) in phButtons) b.setTextColor(Color.parseColor(if (k in phModes) "#5FD0FF" else "#8AA6B4"))
+            colorPh(phDraft ?: phModes)
             apNote.text = (if (onPhone) "Talking to the AirPods directly from this phone." else "Through the laptop panel.") +
-                " Dim switches = not reported by the AirPods yet."
+                " Dim = unknown: ear detection, \"Off\" and press-and-hold aren't reported by the AirPods."
         }
         crBox.visibility = if (cr != null) View.VISIBLE else View.GONE
         if (cr != null) {
@@ -258,6 +268,10 @@ class SetupActivity : Activity() {
             }
         }
         binding = false
+    }
+
+    private fun colorPh(modes: List<String>) {
+        for ((k, b) in phButtons) b.setTextColor(Color.parseColor(if (k in modes) "#5FD0FF" else "#8AA6B4"))
     }
 
     private fun setAp(name: String, value: Any) {

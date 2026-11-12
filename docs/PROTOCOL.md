@@ -67,6 +67,14 @@ back. The ids come from [LibrePods](https://github.com/kavishdevar/librepods) (`
 | `0x34` | Offer "Off" in that cycle | on/off |
 | `0x1B` | Noise cancelling with one AirPod | on/off |
 
+Checked live on AirPods Pro 2 (2026-11): after the notification request (`0F 00 FF FF FF FF`) they report
+`0x0D`, `0x1B`, `0x26`, `0x28`, `0x2E` (and others the panel doesn't use), but **never `0x0A`, `0x1A` or
+`0x34`**, and they **don't echo a change back to the host that sent it**. A change is applied, though:
+reconnecting AAP makes them report the new value (seen for `0x28`). So the panel remembers what it last
+set (`~/.config/headphone-panel/airpods-settings.json`) and shows that for the unreported ones, and its
+"Read back" button reopens the AAP channel (not the audio link) to get a fresh report. LibrePods does the
+same for `0x1A` (it keeps `long_press_byte` in its preferences).
+
 Not done, and why:
 - **Loud Sound Reduction** is not an AAP control command. It is an ATT write (handle `0x1B`) on a
   separate Bluetooth channel, and LibrePods only opens that channel with a vendor-ID hook.
@@ -104,8 +112,32 @@ Apple manufacturer data `0x004C`, first byte `0x07`. As a hex string `h` of that
 | POST | `/api/eq/cycle` | | Next preset, and turns the EQ on (the ring's EQ wedge) |
 | POST | `/api/airpods/setting` | `{"name":"adaptive_level","value":30}` | Names: `adaptive_level` (raw 0–100), `conversational_awareness`, `personalized_volume`, `ear_detection`, `one_bud_anc`, `allow_off` (bool), `press_hold_modes` (list of `off\|anc\|transparency\|adaptive`) |
 | POST | `/api/crusher/setting` | `{"name":"transparency_level","value":40}` | `bass_on`, `transparency_level` (0–100), `at_on_call`, `at_on_pause` (bool), `anc_filter` (int or `"off"`) |
+| POST | `/api/airpods/refresh` | | Reopens the AAP channel so the AirPods report their settings again (takes ~2 s) |
+| GET | `/api/sound` | | `{available, sources:[{id,kind:laptop\|bluetooth,label,muted}], listening, bins, notch:{mic,output}}` |
+| GET | `/api/sound/stream?src=<id>` | | Server-sent events, ~8/s: `{"seq":n,"bins":[160 dB values, 20 Hz–11 kHz log-spaced]}`. Capture stops ~4 s after the last viewer leaves |
+| GET | `/api/sound/inspect?lo=&hi=` | | Peak frequency, level, tonal/steady and a rough label for that band over the last ~3 s, plus ANC advice |
+| POST | `/api/sound/stop` | | Stop listening now |
+| POST | `/api/sound/unmute` | source id | Unmute that microphone |
+| POST | `/api/sound/notch` | `{"kind":"mic"\|"output","freqs":[60,120]}` | Notch filter on the laptop mic (new default input) or in front of the default output; `[]` turns it off and restores the old default |
 | GET | `/api/caps` | | `{crusher:bool, airpods:bool, eq:bool}`. Fast; the rings poll it |
 | POST | `/api/airpods/mode` | `off\|anc\|transparency\|adaptive` | 503 if the AirPods aren't connected |
 | POST | `/api/crusher/mode` | `anc\|transparency\|off` | |
 | POST | `/api/crusher/bass` | `0-10` | |
 | POST | `/api/handoff` | `phone\|laptop` | Who has the AirPods. The laptop steps aside for the phone |
+
+## Sound viewer and "block that sound" (laptop panel)
+
+What the AirPods can't do: their ANC microphones and filters are internal. AAP exposes no mic audio and no
+way to tell the ANC which sound to remove. The only AirPods mic a computer can use is the call mic (HFP):
+mono, low quality, and while it's open the music drops to call quality too.
+
+What the panel does instead (`laptop/hp_sound.py`):
+- **Viewer**: `parec` captures mono 24 kHz from the laptop mic (default) or, behind a confirmation, the
+  headphones' call mic; numpy FFTs (4096 points, a frame every 125 ms) feed a waterfall + spectrum in the
+  page. It only runs while the page is open and visible. The headphone mic stops itself after 3 minutes and
+  the headphones go back to their previous profile.
+- **Pick a sound**: tap (1/3 octave) or drag a range. The panel reports the peak frequency, whether it's a
+  tone or spread out, whether it's steady, and a rough label (mains hum, rumble, fan, voices, whine, hiss).
+- **Reduce it**: outside sound -> only the AirPods' ANC (buttons for Noise Cancellation / Adaptive at the
+  strongest setting; best on steady low sounds). Sound through the laptop -> a PipeWire `bq_notch` filter
+  chain on the laptop mic or on the output (optionally with 2x and 3x harmonics for hum).

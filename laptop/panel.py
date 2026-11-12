@@ -137,7 +137,10 @@ def crusher_state_live():
 # ---- AirPods (AAP over L2CAP, persistent) ----
 AP_MAC = CONFIG.get("airpods_mac", ""); PSM = 0x1001
 HS=bytes.fromhex("00000400010002000000000000000000")
-NOTIFY=bytes.fromhex("040004000F00FFFFFEFF"); FEAT=bytes.fromhex("040004004D00FF00000000000000")
+# notification mask: all ones, as LibrePods sends it
+NOTIFY=bytes.fromhex("040004000F00FFFFFFFF"); FEAT=bytes.fromhex("040004004D00FF00000000000000")
+# Reported after NOTIFY on AirPods Pro 2 (checked live): 0x0D 0x1B 0x26 0x28 0x2E and others. NOT reported:
+# 0x0A ear detection, 0x1A press-and-hold modes, 0x34 allow Off -> the panel remembers what it last set.
 NC=bytes.fromhex("0400040009000d"); BAT=bytes.fromhex("040004000400")
 MODE={"off":1,"anc":2,"transparency":3,"adaptive":4}; MNAME={1:"off",2:"anc",3:"transparency",4:"adaptive"}
 # AAP control commands (04 00 04 00 09 00 <id> <4 data bytes>), ids from LibrePods' docs/source.
@@ -165,6 +168,27 @@ def ap_encode(name, value):
         if bin(b).count("1") < 2:
             raise ValueError("press and hold needs at least two modes")
     return CTL_HDR + bytes([cid, b, 0, 0, 0])
+RAW_LOG = "/tmp/aap-raw.log"
+def raw_log(tag, p):
+    """Append one AAP packet to the raw log (capped at ~1 MB, then truncated)."""
+    try:
+        if os.path.exists(RAW_LOG) and os.path.getsize(RAW_LOG) > 1_000_000:
+            open(RAW_LOG, "w").close()
+        with open(RAW_LOG, "a") as f: f.write(time.strftime("%T ") + tag + " " + p.hex() + "\n")
+    except OSError:
+        pass
+# Settings the AirPods never reported but we set: remembered so the panel can show them (marked as such).
+AP_REMEMBER = os.path.expanduser("~/.config/headphone-panel/airpods-settings.json")
+def ap_remembered():
+    try: return json.load(open(AP_REMEMBER))
+    except (OSError, ValueError): return {}
+def ap_remember(name, value):
+    d = ap_remembered(); d[name] = value
+    try:
+        os.makedirs(os.path.dirname(AP_REMEMBER), exist_ok=True)
+        with open(AP_REMEMBER, "w") as f: json.dump(d, f)
+    except OSError:
+        pass
 def ap_decode(kind, data):
     v = data[0]
     if kind == "bool": return {1: True, 2: False}.get(v)
@@ -226,7 +250,8 @@ class AirPods(threading.Thread):
         super().__init__()
         self.sock=None; self.lock=threading.Lock()
         self.mode=None; self.battery={}; self.online=False; self.ctl={}
-        self.wake = threading.Event()
+        self.echo={}     # id -> time the AirPods last sent that setting (a report or the echo of a change)
+        self.wake = threading.Event(); self.fast = False
         try: self.phone = open(HANDOFF_FILE).read().strip() == "phone"
         except OSError: self.phone = False
     def set_handoff(self, phone):
@@ -241,7 +266,8 @@ class AirPods(threading.Thread):
             subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
         self.wake.set()
     def _parse(self,p):
-        if p[:6]==CTL_HDR and len(p)>=8: self.ctl[p[6]]=bytes(p[7:11])
+        if p[:6]==CTL_HDR and len(p)>=8:
+            self.ctl[p[6]]=bytes(p[7:11]); self.echo[p[6]]=time.time()
         i=p.find(NC)
         if i>=0 and len(p)>i+7: self.mode=p[i+7]
         j=p.find(BAT)
@@ -273,15 +299,18 @@ class AirPods(threading.Thread):
                     # shows the phone joining, so step aside even if the phone couldn't reach us.
                     if len(p)>4 and p[4]==0x2E and PHONE_BT in p and not self.phone:
                         threading.Thread(target=self.set_handoff, args=(True,), daemon=True).start()
-                    if len(p)>6 and (p[4] in (0x0E,0x2E,0x10) or (p[4]==0x09 and p[6] in (0x06,0x20))):
-                        with open("/tmp/aap-raw.log","a") as f: f.write(time.strftime("%T ")+p.hex()+"\n")
-            except Exception:
-                pass
+                    if len(p)>6 and p[4] in (0x09,0x0E,0x2E,0x10):
+                        raw_log("<", p)
+            except Exception as e:
+                if repr(e) != getattr(self, "last_err", None):      # log each new kind of failure once
+                    self.last_err = repr(e); print("AirPods AAP:", repr(e), flush=True)
             with self.lock: self.sock=None
-            self.online=False; self.mode=None; self.battery={}; self.ctl={}
+            self.online=False; self.mode=None; self.battery={}; self.ctl={}; self.echo={}
             if self.phone:
                 subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
             # long backoff (a short one fights another host); a hand-off back wakes us at once
+            if self.fast:
+                self.fast = False; time.sleep(1); continue
             self.wake.wait(60); self.wake.clear()
     def set_mode(self,name):
         with self.lock:
@@ -290,23 +319,51 @@ class AirPods(threading.Thread):
                 self.sock.sendall(bytes.fromhex("0400040009000D")+bytes([MODE[name],0,0,0])); return True
             except Exception:
                 return False
-    def set_setting(self, name, value):
-        pkt = ap_encode(name, value)
+    def send(self, pkt):
         with self.lock:
             if not self.sock: return False
             try: self.sock.sendall(pkt)
             except Exception: return False
-        self.ctl[pkt[6]] = pkt[7:11]      # optimistic; the AirPods' echo overwrites it
+        raw_log(">", pkt)
+        return True
+    def set_setting(self, name, value, wait=0.6):
+        """Send a setting; returns (sent, echoed). AirPods Pro 2 apply a setting without echoing it
+        back to the host that sent it; reconnecting (refresh) makes them report it again."""
+        pkt = ap_encode(name, value)
+        t0 = time.time()
+        if not self.send(pkt): return False, False
+        while time.time() - t0 < wait:
+            if self.echo.get(pkt[6], 0) >= t0: break
+            time.sleep(0.05)
+        echoed = self.echo.get(pkt[6], 0) >= t0
+        if not echoed:
+            self.ctl[pkt[6]] = pkt[7:11]      # optimistic: some settings are accepted silently
+        ap_remember(name, ap_decode(AP_SETTINGS[name][1], pkt[7:11]))
+        return True, echoed
+    def refresh(self):
+        """Read the settings back: they only report them right after the AAP connection opens, so drop the
+        AAP link (not the Bluetooth/audio link) and reconnect at once."""
+        with self.lock:
+            if not self.sock: return False
+            self.fast = True
+            try: self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
         return True
     def settings(self):
-        """Last value the AirPods reported for each setting; None = not reported yet."""
-        return {n: (ap_decode(k, self.ctl[i]) if i in self.ctl else None) for n, (i, k) in AP_SETTINGS.items()}
+        """Last value the AirPods reported for each setting, else the last value we set (remembered);
+        None = unknown."""
+        mem = ap_remembered()
+        return {n: (ap_decode(k, self.ctl[i]) if i in self.ctl else mem.get(n))
+                for n, (i, k) in AP_SETTINGS.items()}
+    def reported(self):
+        """Which settings the AirPods themselves have reported on this connection."""
+        return [n for n, (i, _) in AP_SETTINGS.items() if i in self.echo]
     def state(self):
         bat = self.battery
         if not bat and time.time() - BLE["t"] < 300:
             bat = BLE["battery"]
         return {"online": self.online, "mode": MNAME.get(self.mode, self.mode), "battery": bat,
-                "on_phone": self.phone, "settings": self.settings()}
+                "on_phone": self.phone, "settings": self.settings(), "reported": self.reported()}
 
 AP = AirPods(); AP.start()
 
@@ -325,6 +382,19 @@ threading.Thread(target=eq_loop, daemon=True).start()
 def eq_state():
     return EQ.state() if EQ else {"available": False, "error": EQ_ERR}
 
+# ---- Sound viewer + notch filters, see hp_sound.py ----
+try:
+    import hp_sound
+    SOUND = hp_sound.Analyzer()
+    NOTCH = {k: hp_sound.Notch(k) for k in ("mic", "output")}
+except Exception as e:
+    SOUND = None; NOTCH = {}; SOUND_ERR = str(e)
+def sound_state():
+    if not SOUND: return {"available": False, "error": SOUND_ERR}
+    return {"available": SOUND.available(), "error": "" if SOUND.available() else "numpy is not installed",
+            "sources": hp_sound.sources(), "listening": SOUND.source, "bins": SOUND.bin_centers(),
+            "notch": {k: n.state() for k, n in NOTCH.items()}}
+
 HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html"), encoding="utf-8").read()
 
 class H(BaseHTTPRequestHandler):
@@ -332,7 +402,28 @@ class H(BaseHTTPRequestHandler):
     def _s(self,code,body,ct="application/json"):
         self.send_response(code); self.send_header("content-type",ct); self.end_headers()
         self.wfile.write(body.encode() if isinstance(body,str) else body)
+    def sse(self, src):
+        """Stream spectrum frames as server-sent events until the viewer goes away."""
+        if not SOUND or not SOUND.available(): return self._s(503,json.dumps({"error":"sound viewer unavailable"}))
+        if src not in [x["id"] for x in hp_sound.sources()]: return self._s(400,json.dumps({"error":"unknown microphone"}))
+        self.send_response(200); self.send_header("content-type","text/event-stream")
+        self.send_header("cache-control","no-cache"); self.send_header("x-accel-buffering","no"); self.end_headers()
+        try:
+            for f in SOUND.watch(src):
+                self.wfile.write(b"data: "+json.dumps(f,separators=(",",":")).encode()+b"\n\n"); self.wfile.flush()
+                if "error" in f: break
+            self.wfile.write(b"event: end\ndata: {}\n\n"); self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
     def do_GET(self):
+        from urllib.parse import urlsplit, parse_qs
+        u=urlsplit(self.path); q={k:v[0] for k,v in parse_qs(u.query).items()}
+        if u.path=="/api/sound": return self._s(200,json.dumps(sound_state()))
+        if u.path=="/api/sound/stream": return self.sse(q.get("src",""))
+        if u.path=="/api/sound/inspect":
+            if not SOUND: return self._s(503,json.dumps({"error":SOUND_ERR}))
+            try: return self._s(200,json.dumps(SOUND.inspect(float(q.get("lo",0)),float(q.get("hi",0)))))
+            except ValueError: return self._s(400,json.dumps({"error":"lo/hi must be numbers"}))
         if self.path=="/" : return self._s(200,HTML,"text/html; charset=utf-8")
         if self.path=="/api/caps":
             # which controls exist right now: the flick ring hides the rest
@@ -364,8 +455,11 @@ class H(BaseHTTPRequestHandler):
             if self.path=="/api/airpods/setting":
                 j=json.loads(body or "{}")
                 if j.get("name") not in AP_SETTINGS: return self._s(400,json.dumps({"error":"unknown setting"}))
-                ok=AP.set_setting(j["name"], j.get("value"))
-                return self._s(200 if ok else 503,json.dumps({"settings":AP.settings()}) if ok else json.dumps({"error":"AirPods not connected"}))
+                ok,echoed=AP.set_setting(j["name"], j.get("value"))
+                if not ok: return self._s(503,json.dumps({"error":"AirPods not connected"}))
+                return self._s(200,json.dumps({"echoed":echoed,"settings":AP.settings(),"reported":AP.reported()}))
+            if self.path=="/api/airpods/refresh":
+                return self._s(200 if AP.refresh() else 503,json.dumps({"reported":AP.reported()}))
             if self.path=="/api/crusher/setting":
                 j=json.loads(body or "{}")
                 crusher_setting(j.get("name"), j.get("value"))
@@ -375,6 +469,16 @@ class H(BaseHTTPRequestHandler):
                 if self.path=="/api/eq/cycle": return self._s(200,json.dumps(EQ.cycle()))
                 j=json.loads(body or "{}")
                 return self._s(200,json.dumps(EQ.set(enabled=j.get("enabled"),preset=j.get("preset"),gains=j.get("gains"))))
+            if self.path=="/api/sound/stop":
+                if SOUND: SOUND.stop()
+                return self._s(200,"{}")
+            if self.path=="/api/sound/unmute":
+                if not SOUND or body not in [x["id"] for x in hp_sound.sources()]: return self._s(400,json.dumps({"error":"unknown microphone"}))
+                hp_sound.unmute(body); return self._s(200,"{}")
+            if self.path=="/api/sound/notch":
+                j=json.loads(body or "{}")
+                if j.get("kind") not in NOTCH: return self._s(400,json.dumps({"error":"kind must be mic or output"}))
+                return self._s(200,json.dumps(NOTCH[j["kind"]].set(j.get("freqs") or [])))
             if self.path=="/api/airpods/mode":
                 if body not in MODE: return self._s(400,json.dumps({"error":"unknown mode"}))
                 ok=AP.set_mode(body)
@@ -387,12 +491,15 @@ class H(BaseHTTPRequestHandler):
 
 if __name__=="__main__":
     import signal, sys
-    def bye(*_):
+    def cleanup():
+        if SOUND: SOUND.stop(wait=True)   # also returns the headphones from call mode
+        for n in NOTCH.values(): n.shutdown()
         if EQ: EQ.shutdown()      # put the real headphones back as the default output
-        sys.exit(0)
+    def bye(*_):
+        cleanup(); sys.exit(0)
     signal.signal(signal.SIGTERM, bye)
     print(f"panel on 127.0.0.1:{PORT}")
     try:
         ThreadingHTTPServer(("127.0.0.1",PORT),H).serve_forever()
     finally:
-        if EQ: EQ.shutdown()
+        cleanup()
