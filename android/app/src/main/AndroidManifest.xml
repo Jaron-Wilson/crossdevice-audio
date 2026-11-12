@@ -88,10 +88,11 @@
                 android:value="Keeps the user's audio equalizer attached to the phone's audio output" />
         </service>
 
-        <!-- Smart adaptive: activity changes, hold timer, boot, call state -->
+        <!-- Smart adaptive: activity changes, hold timer, boot, call state; boot/update also restart the EQ -->
         <receiver android:name=".SmartReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.PHONE_STATE" />
             </intent-filter>
         </receiver>

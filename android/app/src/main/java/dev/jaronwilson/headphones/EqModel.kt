@@ -64,6 +64,8 @@ object EqModel {
     fun preset(c: Context): String = p(c).getString("preset", "flat") ?: "flat"
     fun gains(c: Context): List<Double> {
         val n = bands(c).size
+        // a named preset always means the model's current values (Rumble was retuned in 1.3.2)
+        presets(c).firstOrNull { it.key == preset(c) }?.let { pr -> return clamp(c, pr.gains) }
         val saved = runCatching { JSONArray(p(c).getString("gains", "[]")) }.getOrNull()
         return (0 until n).map { saved?.optDouble(it, 0.0) ?: 0.0 }
     }
@@ -133,7 +135,22 @@ object EqModel {
     fun preamp(bands: List<Band>, gains: List<Double>): Double =
         -Math.round(HEADROOM_SHARE * curvePeak(bands, gains) * 2) / 2.0
 
-    fun headroomDb(c: Context): Double = preamp(bands(c), gains(c))
+    /** With a limiter after the EQ (DynamicsProcessing on the phone) a big pre-cut only makes boosts
+     *  sound quieter ("Rumble sounds muted"): cut a quarter of the peak, at most 2 dB, and let the
+     *  limiter catch the rest. */
+    fun preampLimited(bands: List<Band>, gains: List<Double>): Double =
+        -minOf(2.0, Math.round(0.25 * curvePeak(bands, gains) * 2) / 2.0)
+
+    fun headroomDb(c: Context): Double = preampLimited(bands(c), gains(c))
+
+    /** DynamicsProcessing pre-EQ layout: [n] bands split at log-spaced cutoffs (upper edges) from 20 Hz
+     *  to 20 kHz, each band's gain = the biquad curve at the band's log centre. */
+    fun dpBands(bands: List<Band>, gains: List<Double>, n: Int): List<Pair<Double, Double>> =
+        (0 until n).map { i -> freqAt((i + 1.0) / n) to responseDb(bands, gains, freqAt((i + 0.5) / n)) }
+
+    /** True while the sub band is boosted (Rumble): the low-band compressor runs then. */
+    fun subBoosted(bands: List<Band>, gains: List<Double>): Boolean =
+        bands.indexOfFirst { it.key == "sub" }.let { it >= 0 && gains.getOrElse(it) { 0.0 } > 0 }
 
     // ---- filter math ----
     private const val FS = 48000.0

@@ -16,6 +16,6 @@
     {"key": "bass",   "label": "Bass boost",    "gains": [6, 2, 0, 0, 0, 0]},
     {"key": "vocal",  "label": "Vocal/Podcast", "gains": [-3, -1, 2, 4, 1, 0]},
     {"key": "treble", "label": "Treble",        "gains": [0, 0, 0, 2, 5, 0]},
-    {"key": "rumble", "label": "Rumble",        "gains": [4, 0, 0, 0, 0, 10]}
+    {"key": "rumble", "label": "Rumble",        "gains": [6, 0, 0, 0, 0, 12]}
   ]
 }

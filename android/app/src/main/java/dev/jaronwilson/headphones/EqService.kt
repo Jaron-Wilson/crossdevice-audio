@@ -34,7 +34,7 @@ import android.os.IBinder
 class EqService : Service() {
     private sealed class Fx {
         abstract val effect: AudioEffect
-        class Dp(override val effect: DynamicsProcessing) : Fx()
+        class Dp(override val effect: DynamicsProcessing, val mbc: Boolean = false) : Fx()
         class Eq(override val effect: Equalizer) : Fx()
     }
 
@@ -47,7 +47,8 @@ class EqService : Service() {
             val sid = i.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, AudioEffect.ERROR)
             if (sid <= 0) return
             when (i.action) {
-                AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION -> if (sid !in sessions) {
+                // with the system-wide effect running, a per-app one would apply the EQ twice
+                AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION -> if (sid !in sessions && global == null) {
                     make(sid)?.let { sessions[sid] = it; apply(it) }
                 }
                 AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION -> sessions.remove(sid)?.let { release(it) }
@@ -107,10 +108,12 @@ class EqService : Service() {
     /** DynamicsProcessing if the phone has it for this session, else the classic Equalizer. */
     private fun make(session: Int, throwing: Boolean = false): Fx? {
         val errors = mutableListOf<String>()
-        try {
+        // pre-EQ -> 2-band compressor (low band used for Rumble) -> limiter; without the compressor if
+        // the phone refuses that config
+        for (mbc in listOf(true, false)) try {
             val cfg = DynamicsProcessing.Config.Builder(DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
-                2, true, DP_BANDS, false, 0, false, 0, true).build()
-            return Fx.Dp(DynamicsProcessing(PRIORITY, session, cfg))
+                2, true, DP_BANDS, mbc, if (mbc) 2 else 0, false, 0, true).build()
+            return Fx.Dp(DynamicsProcessing(PRIORITY, session, cfg), mbc)
         } catch (e: Throwable) { errors += "DynamicsProcessing: ${e.message ?: e.javaClass.simpleName}" }
         try {
             return Fx.Eq(Equalizer(PRIORITY, session))
@@ -127,17 +130,24 @@ class EqService : Service() {
                     // DynamicsProcessing's pre-EQ is a bank of band gains split at cutoff frequencies;
                     // sample the biquad curve at each band's centre so it matches the other platforms.
                     val eq = DynamicsProcessing.Eq(true, true, DP_BANDS)
-                    for (i in 0 until DP_BANDS) {
-                        val centre = EqModel.freqAt((i + 0.5) / DP_BANDS)
-                        val cutoff = EqModel.freqAt((i + 1.0) / DP_BANDS)
-                        eq.setBand(i, DynamicsProcessing.EqBand(true, cutoff.toFloat(),
-                            EqModel.responseDb(bands, g, centre).toFloat()))
-                    }
+                    for ((i, b) in EqModel.dpBands(bands, g, DP_BANDS).withIndex())
+                        eq.setBand(i, DynamicsProcessing.EqBand(true, b.first.toFloat(), b.second.toFloat()))
                     fx.effect.setPreEqAllChannelsTo(eq)
-                    fx.effect.setInputGainAllChannelsTo(EqModel.preamp(bands, g).toFloat())
-                    // limiter stage: catches the peaks the half-cut preamp leaves (attack 1 ms, release 60 ms,
-                    // ratio 20:1, threshold -1 dBFS) so boosts don't clip
-                    fx.effect.setLimiterAllChannelsTo(DynamicsProcessing.Limiter(true, true, 0, 1f, 60f, 20f, -1f, 0f))
+                    // small pre-cut only (<= 2 dB): the limiter below catches the peaks, so a bass boost
+                    // doesn't make everything quieter
+                    fx.effect.setInputGainAllChannelsTo(EqModel.preampLimited(bands, g).toFloat())
+                    if (fx.mbc) {
+                        // Rumble: gently compress the band below 120 Hz (2.5:1 from -24 dB, +3 dB makeup) so
+                        // the sub-bass is dense rather than a few peaks the limiter squashes
+                        val on = EqModel.subBoosted(bands, g)
+                        val m = DynamicsProcessing.Mbc(true, on, 2)
+                        m.setBand(0, DynamicsProcessing.MbcBand(on, 120f, 10f, 150f, 2.5f, -24f, 6f, -90f, 1f, 0f, 3f))
+                        m.setBand(1, DynamicsProcessing.MbcBand(false, 20000f, 3f, 80f, 1f, 0f, 0f, -90f, 1f, 0f, 0f))
+                        fx.effect.setMbcAllChannelsTo(m)
+                    }
+                    // limiter: threshold -1 dBFS, ratio 20:1, attack 2 ms, release 120 ms (a release much
+                    // shorter than a 45 Hz cycle's tens of ms would distort the bass)
+                    fx.effect.setLimiterAllChannelsTo(DynamicsProcessing.Limiter(true, true, 0, 2f, 120f, 20f, -1f, 0f))
                     fx.effect.enabled = true
                 }
                 is Fx.Eq -> {
@@ -174,7 +184,7 @@ class EqService : Service() {
         private const val CH = "eq"
         private const val PREFS = "eq_service"
         private const val PRIORITY = 1000
-        private const val DP_BANDS = 24
+        const val DP_BANDS = 24
 
         /** Start, update or stop the EQ to match [EqModel]. */
         fun update(c: Context) {

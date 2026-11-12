@@ -197,7 +197,9 @@ class SmartReceiver : BroadcastReceiver() {
                 when (i.action) {
                     SmartAdaptive.ACTION_TRANSITION -> SmartAdaptive.onTransitions(app, i)
                     SmartAdaptive.ACTION_TICK -> SmartAdaptive.process(app)
-                    Intent.ACTION_BOOT_COMPLETED -> SmartAdaptive.sync(app)
+                    // also bring the EQ back after a reboot or an app update (its service doesn't survive either)
+                    Intent.ACTION_BOOT_COMPLETED -> { SmartAdaptive.sync(app); EqService.update(app) }
+                    Intent.ACTION_MY_PACKAGE_REPLACED -> { SmartAdaptive.sync(app); EqService.update(app) }
                     TelephonyManager.ACTION_PHONE_STATE_CHANGED -> SmartAdaptive.onCall(app,
                         i.getStringExtra(TelephonyManager.EXTRA_STATE) == TelephonyManager.EXTRA_STATE_OFFHOOK)
                 }

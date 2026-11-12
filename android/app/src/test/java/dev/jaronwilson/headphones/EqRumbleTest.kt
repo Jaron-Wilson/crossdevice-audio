@@ -34,3 +34,29 @@ class EqRumbleTest {
         assertEquals(EqModel.preamp(bands, listOf(6.0, 2.0, 0.0, 0.0, 0.0)),
             EqModel.preamp(bands, listOf(6.0, 2.0, 0.0, 0.0, 0.0, 0.0)), 0.0)
 }
+
+/** 1.3.2: Rumble max on the phone (limiter path). */
+class EqRumbleMaxTest {
+    private val bands = listOf(
+        EqModel.Band("bass", "Bass", "lowshelf", 80.0, 0.707),
+        EqModel.Band("lowmid", "Low-mid", "peaking", 250.0, 1.0),
+        EqModel.Band("mid", "Mid", "peaking", 1000.0, 1.0),
+        EqModel.Band("highmid", "High-mid", "peaking", 3500.0, 1.0),
+        EqModel.Band("treble", "Treble", "highshelf", 10000.0, 0.707),
+        EqModel.Band("sub", "Sub", "peaking", 45.0, 0.8))
+    private val max = listOf(6.0, 0.0, 0.0, 0.0, 0.0, 12.0)
+
+    @Test fun limiterPathCutsAtMost2Db() {
+        assertEquals(-2.0, EqModel.preampLimited(bands, max), 0.0)
+        assertEquals(0.0, EqModel.preampLimited(bands, List(6) { 0.0 }), 0.0)
+    }
+
+    @Test fun dpBandHolding45HzGetsTheBoost() {
+        val dp = EqModel.dpBands(bands, max, 24)
+        var lo = 20.0
+        val band = dp.first { (cut, _) -> (45.0 >= lo && 45.0 < cut).also { lo = cut } }
+        assertTrue("45 Hz band boost ${band.second}", band.second > 12.0)
+        val at1k = dp.first { it.first > 1000.0 }.second
+        assertTrue("mids stay near 0: $at1k", kotlin.math.abs(at1k) < 1.0)
+    }
+}
