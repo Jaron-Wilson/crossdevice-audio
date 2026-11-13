@@ -109,6 +109,28 @@ Apple manufacturer data `0x004C`, first byte `0x07`. As a hex string `h` of that
   resolves it with the AirPods' IRK (below); without the IRK it can only guess (same model, colour and
   similar battery levels).
 
+### What the AirPods sense and report themselves (no call mode)
+
+| Message | Bytes | Meaning |
+|---|---|---|
+| Ear detection | `04 00 04 00 06 00 <primary> <secondary>` | 0 in ear, 1 out of ear, 2 in case. Sent on changes |
+| Conversation Awareness | `04 00 04 00 4B 00 02 00 01 <level>` | The wearer started (01/02) or stopped (03) speaking; 08/09 normal. Only while CA is on |
+| Microphone stream start | `04 00 04 00 58 00 00 00 09 00 00 01 82 00 00 00 04 96 00` | Asks for the mic stream |
+| Microphone stream stop | `04 00 04 00 58 00 00 00 02 00 03 01` | |
+| Microphone audio | `04 00 04 00 58 00 01 00` + 14 more header bytes, then `[timestamp u32 LE][len u8][AU]`… | AAC-ELD, mono, 64 kHz, 480-sample frames; AudioSpecificConfig `F8 E6 30 00` |
+
+Sources: LibrePods [`docs/AAP Definitions.md`](https://github.com/kavishdevar/librepods) (0x06, 0x4B, 0x2E),
+[librepods PR #655](https://github.com/librepods-org/librepods/pull/655) (`aacp.rs`, `aacp_audio.rs`, `eld.rs`) and
+the LibrePods `android/rewrite` branch (`AACPManager.requestMicrophoneStream`, `MicrophoneFrame`, `EldDecoder`) for
+0x58. LibrePods turns Conversation Awareness off while the stream runs; so does this app. The mic stream is not
+documented by Apple and is not yet confirmed here on real AirPods, so the app treats it as experimental: if no
+audio arrives within 5 s it stops and says so, and it never falls back to another microphone. No AAP message is
+known that reports an ambient noise *level*: Adaptive Audio measures it inside the AirPods and acts on it.
+
+The Crusher reports nothing it senses over AT: `AT.UIAUDIO?` and its unsolicited `.UIAUDIO` lines give only the
+mode, `AT.CRUSHER?` the bass. The Airoha SDK inside Skull-iQ has an "environment detection" call (stationary
+noise per side, ANC gains), but Skull-iQ never calls it, and it would go over Airoha's RACE transport, not AT.
+
 ### Proximity keys over AAP (Android Last seen / finder)
 
 Sent on the phone's own AAP link, format from LibrePods (`AACPManager`): request
@@ -151,15 +173,15 @@ doesn't send one.
 
 ## Sound viewer and "block that sound" (laptop panel)
 
-What the AirPods can't do: their ANC microphones and filters are internal. AAP exposes no mic audio and no
-way to tell the ANC which sound to remove. The only AirPods mic a computer can use is the call mic (HFP):
-mono, low quality, and while it's open the music drops to call quality too.
+What the AirPods can't do: their ANC filters are internal, and AAP has no way to tell the ANC which sound to
+remove. Their microphones *are* reachable without call mode through the AAP microphone stream (0x58, below),
+which the phone app uses; the laptop panel doesn't (yet), and never opens the HFP call mic.
 
 What the panel does instead (`laptop/hp_sound.py`):
-- **Viewer**: `parec` captures mono 24 kHz from the laptop mic (default) or, behind a confirmation, the
-  headphones' call mic; numpy FFTs (4096 points, a frame every 125 ms) feed a waterfall + spectrum in the
-  page. It only runs while the page is open and visible. The headphone mic stops itself after 3 minutes and
-  the headphones go back to their previous profile.
+- **Viewer**: `parec` captures mono 24 kHz from the laptop mic only (the headphones' call mic is never
+  offered: opening it would switch them to HFP); numpy FFTs (4096 points, a frame every 125 ms) feed a
+  waterfall + spectrum in the page. It only runs while the page is open and visible. For listening through
+  the AirPods themselves, use the phone app's *What your AirPods hear* (below).
 - **Pick a sound**: tap (1/3 octave) or drag a range. The panel reports the peak frequency, whether it's a
   tone or spread out, whether it's steady, and a rough label (mains hum, rumble, fan, voices, whine, hiss).
 - **Reduce it**: outside sound -> only the AirPods' ANC (buttons for Noise Cancellation / Adaptive at the

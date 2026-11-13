@@ -214,6 +214,34 @@ follows LibrePods and hasn't been confirmed on every firmware.
 spot where they disconnected. *Location all the time* (optional, separate) so that works while the app is
 closed. *Nearby devices* (already used for the widget) for the scans. *Vibrate* for the finder's buzz.
 
+## Phone first (Android 1.5.0)
+
+Everything that is a command to the headphones, or sound processing on the device that plays, runs on the
+phone with no laptop. Anything that "listens" uses the headphones' own sensing, never a laptop or phone mic,
+and nothing uses call (HFP) mode except Live Translation (see below).
+
+| Feature | Runs on | Audio input | Fully on the phone? |
+|---|---|---|---|
+| AirPods modes (Off / ANC / Transparency / Adaptive) | Phone (AAP), laptop panel, rings | none | Yes: app screen and widget |
+| Adaptive level, Conversation Awareness, Personalized Volume, ear detection, one-bud ANC, press-and-hold cycle | Phone (AAP), laptop panel | AirPods' own mics, inside the AirPods | Yes |
+| Ear status (in ear / in case) | Phone, laptop panel | AirPods' sensors (AAP `0x06`) | Yes (shown on the app screen) |
+| Crusher modes, sensory bass level and on/off, hear-through on calls / paused | Phone (AT over RFCOMM), laptop panel, Windows | none | Yes: app screen (mode buttons and a bass slider in 1.5.0) and widget |
+| EQ, Rumble, limiter, low-band compressor | Phone (DynamicsProcessing), laptop (PipeWire), Windows (Equalizer APO) | none | Yes; 1.5.0 uses the laptop's compressor numbers and also compresses when only Bass is boosted |
+| Smart adaptive (AirPods and Crusher) | Phone | phone motion sensors, no mic | Yes |
+| What your AirPods hear (sound viewer: spectrum, "what is that sound", block it) | Phone (new in 1.5.0) | AirPods' mics over the AAP mic stream (`0x58`), no call mode. Experimental | Yes |
+| Laptop mic tools (viewer and notch filters) | Laptop | laptop mic | Laptop only: it is a tool for the laptop's own mic and output, not a headphone feature |
+| Live Translation | Phone | AirPods' mics through Bluetooth SCO (call mode) | Yes, but it uses call mode for the session |
+| Spatial audio (HRTF) and head tracking | Laptop | AirPods' motion sensors (AAP `0x17`) | No: Android gives apps no way to render HRTF on all audio or to feed head tracking into its own spatializer |
+| Last seen and Find | Phone | BLE adverts, AAP battery and IRK | Yes (the laptop's connect log is optional) |
+| Hand-off | Phone and laptop | none | Only matters when a laptop is used too |
+
+**Crusher "adaptive".** The Crusher ANC 2 has no adaptive ANC and reports nothing it senses: over AT it only
+answers its mode and bass. So Crusher automation is Smart adaptive (phone motion sensors), not sound.
+
+**Live Translation and call mode.** Today it hears the other person through the AirPods' call mic (SCO). The AAP
+mic stream used by *What your AirPods hear* could replace that without call mode, once it is confirmed on your
+AirPods; that change is not made yet.
+
 ## How it fits together
 
 ```mermaid
