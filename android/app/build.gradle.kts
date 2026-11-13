@@ -19,8 +19,8 @@ android {
         applicationId = "dev.jaronwilson.headphones"
         minSdk = 31
         targetSdk = 35
-        versionCode = 29
-        versionName = "1.5.13"
+        versionCode = 30
+        versionName = "1.6.0"
         // ML Kit's translate/language-id native libraries are large; Android 12+ phones are 64-bit ARM
         ndk { abiFilters += listOf("arm64-v8a") }
     }

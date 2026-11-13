@@ -229,6 +229,7 @@ and nothing uses call (HFP) mode except Live Translation (see below).
 | EQ, Rumble, limiter, low-band compressor | Phone (DynamicsProcessing), laptop (PipeWire), Windows (Equalizer APO) | none | Yes; 1.5.0 uses the laptop's compressor numbers and also compresses when only Bass is boosted |
 | Smart adaptive (AirPods and Crusher) | Phone | phone motion sensors, no mic | Yes |
 | What your AirPods hear (sound viewer: spectrum, "what is that sound", block it) | Phone (new in 1.5.0) | AirPods' mics over the AAP mic stream (`0x58`), no call mode. Experimental | Yes |
+| Filtered hearing (the room through the AirPods minus a learned fan/hum, a tapped band, one enrolled voice, or all speech) | Phone (new in 1.6.0) | AirPods' mics over `0x58`, played back over A2DP with the AirPods in Noise Cancellation; ~200+ ms delay | Yes |
 | Laptop mic tools (viewer and notch filters) | Laptop | laptop mic | Laptop only: it is a tool for the laptop's own mic and output, not a headphone feature |
 | Live Translation | Phone | AirPods' mics through Bluetooth SCO (call mode) | Yes, but it uses call mode for the session |
 | Spatial audio (HRTF) and head tracking | Laptop | AirPods' motion sensors (AAP `0x17`) | No: Android gives apps no way to render HRTF on all audio or to feed head tracking into its own spatializer |

@@ -20,6 +20,8 @@
     <!-- Live Translation: the AirPods' mics (only while you have it on), as a microphone foreground service -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Filtered hearing: plays the cleaned room sound to the AirPods with the screen off (only while it is on) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Last seen (optional, asked on the Last seen screen): the phone's location when headphones disconnect,
          stored on the phone only. Background location only if you choose "Allow all the time". -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -64,6 +66,12 @@
             android:name=".ListenActivity"
             android:exported="false"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Filtered hearing: keeps the AirPods' mic stream and the playback going with the screen off -->
+        <service
+            android:name=".HearingService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <!-- Last seen: map, history, permissions -->
         <activity

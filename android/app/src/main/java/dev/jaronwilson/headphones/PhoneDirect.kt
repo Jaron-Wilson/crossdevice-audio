@@ -30,6 +30,8 @@ object PhoneDirect {
     private val HANDSHAKE = hex("00000400010002000000000000000000")
     private val FEATURES = hex("040004004D00FF00000000000000")
     private val MODE = mapOf("off" to 1, "anc" to 2, "transparency" to 3, "adaptive" to 4)
+    /** 0x0D value -> mode name. */
+    val MODE_NAMES: Map<Int, String> = MODE.entries.associate { (k, v) -> v to k }
     private const val PREFS = "direct"
 
     /** "ok", "fail" or "" (not tried yet). */

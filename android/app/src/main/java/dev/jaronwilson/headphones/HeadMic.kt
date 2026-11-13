@@ -38,6 +38,13 @@ class HeadMic(private val context: Context, private val listener: Listener) {
     @Volatile private var caBefore: Int? = null           // 0x28 as the AirPods reported it (1 on, 2 off)
     @Volatile var ear: Pair<Int, Int>? = null; private set
     @Volatile var mode: Int? = null; private set
+    /** Gets every decoded block (mono 16-bit at [AapMic.RATE]) and when it arrived (System.nanoTime), on the
+     *  receive thread: filtered hearing ([FilteredHearing]) processes it there. */
+    @Volatile var pcmSink: ((ShortArray, Long) -> Unit)? = null
+    /** How long a session may run (filtered hearing raises it). */
+    @Volatile var maxMs = MAX_MS
+    /** Times the stream stalled and was asked for again. */
+    @Volatile var restarts = 0; private set
     private var decoder: MediaCodec? = null
     private var outRate = AapMic.RATE
     private var outCh = 1
@@ -110,7 +117,6 @@ class HeadMic(private val context: Context, private val listener: Listener) {
         var startSent = 0L
         var lastAudio = 0L
         var gotAudio = false
-        var restarts = 0
         try {
             val input = s.inputStream
             // Reader: settings first (to learn Conversation Awareness), then audio.
@@ -190,7 +196,7 @@ class HeadMic(private val context: Context, private val listener: Listener) {
                     Log.d(TAG, "stall ${now - lastAudio} ms: restart #$restarts (mic=$micCount)")
                     send(AapMic.STOP); Thread.sleep(200); send(AapMic.START); startSent = System.currentTimeMillis()
                 }
-                if (now - started > MAX_MS) { running = false; finish("Stopped after ${MAX_MS / 60000} minutes"); break }
+                if (now - started > maxMs) { running = false; finish("Stopped after ${maxMs / 60000} minutes"); break }
             }
             reader.join(500)
         } catch (e: Throwable) {
@@ -242,6 +248,7 @@ class HeadMic(private val context: Context, private val listener: Listener) {
 
     private fun decode(au: ByteArray) {
         val c = decoder ?: return
+        val arrived = System.nanoTime()
         auCount++
         if (auCount == 1) firstAu = System.currentTimeMillis()
         if (auCount <= 5 || auCount % 1000 == 0) Log.d(TAG, "AU #$auCount len=${au.size} ${hexHead(au, au.size, 16)} " +
@@ -271,6 +278,7 @@ class HeadMic(private val context: Context, private val listener: Listener) {
                             if (dump) Log.v(TAG, "level: $secAu frames in ${tNow - secStart} ms, peak $secPeak")
                             secStart = tNow; secAu = 0; secPeak = 0
                         }
+                        pcmSink?.let { sink -> runCatching { sink(pcm, arrived) }.onFailure { Log.w(TAG, "filter", it) } }
                         if (analyzer.feedPcm16(pcm)) {
                             listener.onStatus("Listening through the AirPods' microphones (${outRate / 1000} kHz, no call mode)")
                             listener.onFrame(analyzer)

@@ -13,6 +13,7 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import kotlin.math.ln
 import kotlin.math.pow
@@ -23,10 +24,21 @@ import kotlin.math.pow
  * spectrum to ask about one band. The block buttons use the AirPods' own noise control (Adaptive at its
  * strongest, or Noise Cancellation), sent on the same link.
  *
- * Runs only while this screen is open (it stops in onPause), at most a few minutes. Nothing is recorded.
+ * Listening runs only while this screen is open (it stops in onPause), at most a few minutes, unless
+ * Filtered hearing is on: then the session lives in [FilteredHearing] with a foreground service and a Stop
+ * button in its notification. Nothing is recorded.
  */
+private var mixSlider = 50
+
 class ListenActivity : Activity(), HeadMic.Listener {
-    private var mic: HeadMic? = null
+    private val mic: HeadMic? get() = FilteredHearing.mic
+    private val proc get() = FilteredHearing.proc
+    private lateinit var fhBtn: Button
+    private lateinit var fhStatus: TextView
+    private lateinit var suggestBtn: Button
+    private lateinit var voiceBtn: Button
+    private lateinit var allSpeechBtn: Button
+    private var pendingOn = false
     private lateinit var status: TextView
     private lateinit var level: TextView
     private lateinit var look: TextView
@@ -72,26 +84,140 @@ class ListenActivity : Activity(), HeadMic.Listener {
         col.addView(row)
         col.addView(text("ANC lowers outside sound as a whole, steady low sounds most. It can't remove one chosen " +
             "frequency: AirPods expose no way to steer their noise filter.", 11f))
+        addFilteredHearing(col)
         setContentView(ScrollView(this).apply { addView(col); setBackgroundColor(Color.parseColor("#0F1419")) })
         if (!Handoff.local(this)) status.text = "The AirPods aren't on this phone right now. Connect them to the phone first."
     }
 
-    override fun onPause() {
-        super.onPause()
-        mic?.stop("Stopped (left the screen)"); mic = null
-        startBtn.text = "Start listening"
+    override fun onResume() {
+        super.onResume()
+        FilteredHearing.ui = this
+        startBtn.text = if (mic != null) "Stop" else "Start listening"
+        refreshFh()
     }
 
-    override fun onDestroy() {
-        mic?.stop("Stopped"); mic = null
-        super.onDestroy()
+    override fun onPause() {
+        super.onPause()
+        FilteredHearing.ui = null
+        pendingOn = false
+        // Filtered hearing keeps going with the screen off (its notification has Stop); plain listening doesn't.
+        if (!FilteredHearing.on) FilteredHearing.stopMic("Stopped (left the screen)")
     }
 
     private fun toggle() {
-        mic?.let { it.stop(); mic = null; startBtn.text = "Start listening"; return }
+        if (mic != null) { FilteredHearing.stopMic(); startBtn.text = "Start listening"; return }
         if (!Handoff.local(this)) { status.text = "Connect the AirPods to this phone first."; return }
-        mic = HeadMic(applicationContext, this).also { it.start() }
+        FilteredHearing.startMic(this)
         startBtn.text = "Stop"
+    }
+
+    // ---------------------------------------------------------------- Filtered hearing card
+    private fun addFilteredHearing(col: LinearLayout) {
+        col.addView(text("Filtered hearing", 20f, "#E8EDF2").apply { setPadding(0, dp(22), 0, dp(2)) })
+        col.addView(text("Hear the room through your AirPods with one sound taken out: a fan, a hum, a band you tap, " +
+            "one person's voice, or all speech. The AirPods go to Noise Cancellation and play back what their own mics " +
+            "hear, cleaned on the phone. Music keeps playing. It runs with the screen off until you stop it (notification). " +
+            "The learned sound and voice stay in memory only.", 11f))
+        fhBtn = Button(this).apply { isAllCaps = false; textSize = 18f; setOnClickListener { toggleFh() } }
+        col.addView(fhBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(64)))
+        val mixLabel = text("", 13f, "#E8EDF2"); col.addView(mixLabel)
+        fun showMix(v: Int) {
+            val g = FilteredHearing.mixGain(v)
+            mixLabel.text = "Room sound (Mix): " + if (v == 0) "silent" else "${v} %  (${"%+.0f".format(20 * kotlin.math.log10(g))} dB)"
+        }
+        col.addView(SeekBar(this).apply {
+            max = 100; progress = mixSlider; showMix(mixSlider)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, v: Int, fromUser: Boolean) {
+                    mixSlider = v; showMix(v); val g = FilteredHearing.mixGain(v); proc.post { mix = g }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)))
+        suggestBtn = Button(this).apply { isAllCaps = false; visibility = View.GONE; setOnClickListener { learnSound() } }
+        col.addView(suggestBtn)
+        fun row(vararg b: Button) = LinearLayout(this).apply {
+            for (x in b) addView(x, LinearLayout.LayoutParams(0, dp(60), 1f))
+            col.addView(this)
+        }
+        fun btn(t: String, act: () -> Unit) = Button(this).apply { text = t; isAllCaps = false; textSize = 14f; setOnClickListener { act() } }
+        row(btn("Learn this sound (fan, hum)") { learnSound() }, btn("Block tapped band") { blockBand() })
+        val hold = Button(this).apply {
+            text = "Hold to learn a voice"; isAllCaps = false; textSize = 14f
+            setOnTouchListener { v, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        if (mic == null) fhStatus.text = "Start listening first."
+                        else { proc.post { startEnroll() }; text = "Listening to the voice... keep holding (~10 s)" }
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        text = "Hold to learn a voice"; proc.post { finishEnroll() }
+                        if (e.action == MotionEvent.ACTION_UP) v.performClick()
+                    }
+                }
+                true
+            }
+        }
+        voiceBtn = btn("Remove that voice") {
+            if (proc.speaker == null) { fhStatus.text = "Learn a voice first: hold the button while they talk."; return@btn }
+            val m = if (proc.voiceMode == VoiceMode.TARGET) VoiceMode.OFF else VoiceMode.TARGET
+            proc.post { voiceMode = m }; voiceModeShown = m; refreshFh()
+        }
+        row(hold, voiceBtn)
+        allSpeechBtn = btn("Remove all speech") {
+            val m = if (proc.voiceMode == VoiceMode.ALL_SPEECH) VoiceMode.OFF else VoiceMode.ALL_SPEECH
+            proc.post { voiceMode = m }; voiceModeShown = m; refreshFh()
+        }
+        row(allSpeechBtn, btn("Clear filters") {
+            proc.post { setNoise(null); clearBands(); voiceMode = VoiceMode.OFF }
+            voiceModeShown = VoiceMode.OFF; FilteredHearing.clearEvent(); refreshFh()
+        })
+        fhStatus = text("", 13f, "#99FFBB"); col.addView(fhStatus)
+        col.addView(text("Safety: the room sound is limited to well under music level and fades in; if a whistle " +
+            "(feedback) builds up it is muted at once. Turning it off puts the AirPods back in the mode they were in; " +
+            "Conversation Awareness comes back when listening stops. Expect a delay (Bluetooth both ways), so it suits " +
+            "steady background, not lip-sync.", 11f))
+        refreshFh()
+    }
+
+    /** What the buttons show; posted settings apply a moment later, so remember the voice mode we asked for. */
+    private var voiceModeShown: VoiceMode? = null
+
+    private fun refreshFh() {
+        if (!::fhBtn.isInitialized) return
+        fhBtn.text = when {
+            FilteredHearing.on -> "Filtered hearing: ON  (tap to turn off)"
+            pendingOn -> "Starting... (waiting for the AirPods' mics)"
+            else -> "Turn on filtered hearing"
+        }
+        val vm = voiceModeShown ?: proc.voiceMode
+        voiceBtn.text = if (vm == VoiceMode.TARGET) "Removing that voice (tap: stop)" else "Remove that voice"
+        allSpeechBtn.text = if (vm == VoiceMode.ALL_SPEECH) "Removing all speech (tap: stop)" else "Remove all speech"
+        fhStatus.text = FilteredHearing.describe()
+    }
+
+    private fun toggleFh() {
+        if (FilteredHearing.on) { FilteredHearing.turnOff(); refreshFh(); return }
+        if (mic == null) {
+            if (!Handoff.local(this)) { fhStatus.text = "Connect the AirPods to this phone first."; return }
+            FilteredHearing.startMic(this); startBtn.text = "Stop"; pendingOn = true; refreshFh(); return
+        }
+        FilteredHearing.turnOn(this)?.let { fhStatus.text = it; return }
+        refreshFh()
+    }
+
+    private fun learnSound() {
+        if (mic == null) { fhStatus.text = "Start listening first, then learn the sound while it is the main thing heard."; return }
+        proc.post { learnNoise(3.0) }
+        suggestBtn.visibility = View.GONE
+        fhStatus.text = "Learning the sound for 3 s... keep quiet so only it is heard."
+    }
+
+    private fun blockBand() {
+        val b = band ?: run { fhStatus.text = "Tap the spectrum on the sound's band first, then Block."; return }
+        proc.post { addBand(b.first, b.second) }
+        fhStatus.text = "Blocking ${b.first.toInt()}-${b.second.toInt()} Hz."
     }
 
     private fun sendMode(mode: String) {
@@ -125,6 +251,11 @@ class ListenActivity : Activity(), HeadMic.Listener {
                 "${"%.0f".format(l.peakHz)} Hz, ${l.label}" +
                 (if (l.tonal) ", a tone" else "") + (if (l.steady) ", steady" else ", changing") +
                 "\n" + l.advice
+        // Auto-suggest: a steady fan / hum / motor / air sound can be learned and taken out
+        if (l != null && l.steady && proc.noise == null && Regex("fan|hum|motor|air|rumble|whine|hiss").containsMatchIn(l.label)) {
+            suggestBtn.text = "Block it: ${l.label} (learn it for 3 s)"
+            suggestBtn.visibility = View.VISIBLE
+        } else if (proc.noise != null) suggestBtn.visibility = View.GONE
     }
 
     // ---- HeadMic.Listener (called on its threads) ----
@@ -135,10 +266,12 @@ class ListenActivity : Activity(), HeadMic.Listener {
         level.text = "Level at the AirPods' mics: ${"%.0f".format(analyzer.levelDb)} dBFS (relative, not calibrated)" +
             (mic?.ear?.let { "\nEars: " + PhoneDirect.earText(it) } ?: "")
         showLook()
+        if (pendingOn) { pendingOn = false; FilteredHearing.turnOn(this)?.let { fhStatus.text = it } }
+        refreshFh()
     }
 
     override fun onEnded(reason: String) = runOnUiThread {
-        status.text = reason; mic = null; startBtn.text = "Start listening"
+        status.text = reason; startBtn.text = "Start listening"; pendingOn = false; refreshFh()
     }
 }
 
