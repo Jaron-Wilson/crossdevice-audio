@@ -165,7 +165,24 @@ object PhoneDirect {
      * Returns the mode the AirPods report, or null if they said nothing in time.
      */
     private fun session(context: Context, setTo: String?, listenMs: Long,
-                        controls: List<Pair<Int, Int>> = emptyList()): String? {
+                        controls: List<Pair<Int, Int>> = emptyList()): String? = synchronized(aapLock) {
+        // While "What your AirPods hear" holds the link, a second AAP link from this phone gets in its way (seen:
+        // the listening link then received nothing at all): send through that session, answer reads from memory.
+        live?.let { send ->
+            if (setTo != null) send(modePacket(setTo))
+            for (c in controls) send(controlPacket(c.first, c.second))
+            return setTo ?: prefs(context).getString("mode", null)
+        }
+        sessionLocked(context, setTo, listenMs, controls)
+    }
+
+    /** Serialises this app's AAP links: one at a time, as the AirPods expect from one host. */
+    val aapLock = Any()
+    /** The [HeadMic] session's sender while it holds the AAP link (set and cleared under [aapLock]). */
+    @Volatile var live: ((ByteArray) -> Boolean)? = null
+
+    private fun sessionLocked(context: Context, setTo: String?, listenMs: Long,
+                              controls: List<Pair<Int, Int>>): String? {
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: error("no Bluetooth")
         val mac = Config.airpodsMac(context).ifEmpty { error("Pick your AirPods in the Headphones app") }
         val sock = socket(adapter.getRemoteDevice(mac))

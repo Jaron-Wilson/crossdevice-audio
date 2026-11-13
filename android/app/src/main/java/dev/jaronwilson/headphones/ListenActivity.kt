@@ -82,6 +82,11 @@ class ListenActivity : Activity(), HeadMic.Listener {
         startBtn.text = "Start listening"
     }
 
+    override fun onDestroy() {
+        mic?.stop("Stopped"); mic = null
+        super.onDestroy()
+    }
+
     private fun toggle() {
         mic?.let { it.stop(); mic = null; startBtn.text = "Start listening"; return }
         if (!Handoff.local(this)) { status.text = "Connect the AirPods to this phone first."; return }

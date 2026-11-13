@@ -21,6 +21,14 @@ import kotlin.math.sqrt
  * `aacp_audio.rs`; Android: the `android/rewrite` branch, `AACPManager.requestMicrophoneStream` and
  * `MicrophoneFrame.parsePacket`). Two independent implementations agree on the bytes. It is not yet
  * confirmed on every firmware, so the app treats it as experimental and says so when nothing arrives.
+ *
+ * Checked on AirPods Pro 2 (A3047/A3048, firmware build string 81.2675000075000000.6421) with a Samsung S26
+ * Ultra, music idle (A2DP suspended, no SCO):
+ * - out of the ears: [START] is answered (04000400 5800 0000 0300 010101), audio follows within ~0.6 s and
+ *   decodes cleanly, but often stops after ~0.2 s; asking again (STOP, START) brings more. Runs of up to
+ *   30 s were seen.
+ * - during a call on the AirPods (HFP/SCO active, started by the user, not by this app): no answer to [START]
+ *   or [STOP] at all, with LibrePods' Linux or Android opening bytes. [HeadMic] doesn't start during a call.
  */
 object AapMic {
     private fun hex(s: String) = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
@@ -29,7 +37,9 @@ object AapMic {
     val START: ByteArray = hex("04000400580000000900000182000000049600")
     /** Stop it (0x58, length 2). */
     val STOP: ByteArray = hex("040004005800000002000301")
-    /** AudioSpecificConfig for the decoder: AAC-ELD (object type 39), 64 kHz, mono, 480-sample frames. */
+    /** AudioSpecificConfig for the decoder: AAC-ELD (object type 39), mono, 480-sample frames. Its rate index
+     *  says 48 kHz (so Android's decoder reports 48000), but the AirPods send 133 frames a second (measured on
+     *  AirPods Pro 2, A3047), so the audio is really [RATE] = 64 kHz, as LibrePods plays it. */
     val ASC: ByteArray = byteArrayOf(0xF8.toByte(), 0xE6.toByte(), 0x30, 0x00)
     const val RATE = 64_000
     private const val HEADER = 22
