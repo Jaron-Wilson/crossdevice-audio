@@ -229,7 +229,7 @@ and nothing uses call (HFP) mode except Live Translation (see below).
 | EQ, Rumble, limiter, low-band compressor | Phone (DynamicsProcessing), laptop (PipeWire), Windows (Equalizer APO) | none | Yes; 1.5.0 uses the laptop's compressor numbers and also compresses when only Bass is boosted |
 | Smart adaptive (AirPods and Crusher) | Phone | phone motion sensors, no mic | Yes |
 | What your AirPods hear (sound viewer: spectrum, "what is that sound", block it) | Phone (new in 1.5.0) | AirPods' mics over the AAP mic stream (`0x58`), no call mode. Experimental | Yes |
-| Filtered hearing (the room through the AirPods minus a learned fan/hum, a tapped band, one enrolled voice, or all speech) | Phone (new in 1.6.0) | AirPods' mics over `0x58`, played back over A2DP with the AirPods in Noise Cancellation; ~200+ ms delay | Yes |
+| Filtered hearing (the room through the AirPods minus a learned fan/hum, keyboard clicks, a tapped band, one enrolled voice, your own voice, or all speech; or voices only) | Phone (1.6.0; neural engine in 1.7.0) | AirPods' mics over `0x58`, played back over A2DP with the AirPods in Noise Cancellation; ~200+ ms delay (+30 ms for the neural engine). On-device DeepFilterNet3 + CAM++ speaker embedding (ONNX Runtime), or a Light classical engine | Yes |
 | Laptop mic tools (viewer and notch filters) | Laptop | laptop mic | Laptop only: it is a tool for the laptop's own mic and output, not a headphone feature |
 | Live Translation | Phone | AirPods' mics through Bluetooth SCO (call mode) | Yes, but it uses call mode for the session |
 | Spatial audio (HRTF) and head tracking | Laptop | AirPods' motion sensors (AAP `0x17`) | No: Android gives apps no way to render HRTF on all audio or to feed head tracking into its own spatializer |
@@ -352,5 +352,12 @@ code (roughly 2,500 Python, 2,200 Kotlin and a 290-line web panel page), and non
 - [apple-wireshark](https://github.com/pabloaul/apple-wireshark): AAP opcode names.
 - [OpenPods](https://github.com/adolfintel/OpenPods): the BLE proximity-broadcast battery layout.
 - [AndroidHiddenApiBypass](https://github.com/LSPosed/AndroidHiddenApiBypass).
+- [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (DeepFilterNet3, Hendrik Schröter; MIT / Apache-2.0), exported for streaming with
+  the torchDF wrapper by [grazder](https://github.com/grazder/DeepFilterNet): Filtered hearing's neural noise / speech separation.
+- [3D-Speaker](https://github.com/modelscope/3D-Speaker) CAM++ speaker model (Alibaba; Apache-2.0), ONNX conversion by
+  [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0); downloaded at build time with a checksum.
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT) runs both on the phone.
+- Tests use excerpts of [LibriSpeech](https://www.openslr.org/12) test-clean (CC BY 4.0), fetched at test time, never committed.
+  Model licences and sources: `android/app/src/main/assets/models/NOTICE.txt`.
 
 Not affiliated with Apple or Skullcandy. AirPods is a trademark of Apple Inc.

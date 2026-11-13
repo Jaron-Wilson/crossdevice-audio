@@ -67,6 +67,14 @@
             android:exported="false"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
 
+        <!-- Filtered hearing benchmark: no launcher entry; only the shell (adb, which holds DUMP) can open it.
+             Synthetic audio in memory; plays nothing. -->
+        <activity
+            android:name=".BenchActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
         <!-- Filtered hearing: keeps the AirPods' mic stream and the playback going with the screen off -->
         <service
             android:name=".HearingService"

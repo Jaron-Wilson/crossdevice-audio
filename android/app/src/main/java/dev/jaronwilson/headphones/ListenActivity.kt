@@ -29,6 +29,7 @@ import kotlin.math.pow
  * button in its notification. Nothing is recorded.
  */
 private var mixSlider = 50
+private var amountSlider = 100
 
 class ListenActivity : Activity(), HeadMic.Listener {
     private val mic: HeadMic? get() = FilteredHearing.mic
@@ -112,12 +113,20 @@ class ListenActivity : Activity(), HeadMic.Listener {
     }
 
     // ---------------------------------------------------------------- Filtered hearing card
+    private lateinit var engineNeural: Button
+    private lateinit var engineLight: Button
+    private lateinit var voicesOnlyBtn: Button
+    private lateinit var ownBtn: Button
+    private lateinit var clicksBtn: Button
+    private var clicksShown = false
+
     private fun addFilteredHearing(col: LinearLayout) {
+        FilteredHearing.load(this)
         col.addView(text("Filtered hearing", 20f, "#E8EDF2").apply { setPadding(0, dp(22), 0, dp(2)) })
-        col.addView(text("Hear the room through your AirPods with one sound taken out: a fan, a hum, a band you tap, " +
-            "one person's voice, or all speech. The AirPods go to Noise Cancellation and play back what their own mics " +
-            "hear, cleaned on the phone. Music keeps playing. It runs with the screen off until you stop it (notification). " +
-            "The learned sound and voice stay in memory only.", 11f))
+        col.addView(text("Hear the room through your AirPods with sounds taken out: a fan, a hum, keyboard clicks, a band " +
+            "you tap, one person's voice, all speech, or everything but voices. The AirPods go to Noise Cancellation and " +
+            "play back what their own mics hear, cleaned on the phone. Music keeps playing. It runs with the screen off " +
+            "until you stop it (notification). What it learns (numbers, no audio) is saved on the phone until you tap Forget.", 11f))
         fhBtn = Button(this).apply { isAllCaps = false; textSize = 18f; setOnClickListener { toggleFh() } }
         col.addView(fhBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(64)))
         val mixLabel = text("", 13f, "#E8EDF2"); col.addView(mixLabel)
@@ -135,54 +144,98 @@ class ListenActivity : Activity(), HeadMic.Listener {
                 override fun onStopTrackingTouch(sb: SeekBar) {}
             })
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)))
-        suggestBtn = Button(this).apply { isAllCaps = false; visibility = View.GONE; setOnClickListener { learnSound() } }
-        col.addView(suggestBtn)
         fun row(vararg b: Button) = LinearLayout(this).apply {
             for (x in b) addView(x, LinearLayout.LayoutParams(0, dp(60), 1f))
             col.addView(this)
         }
         fun btn(t: String, act: () -> Unit) = Button(this).apply { text = t; isAllCaps = false; textSize = 14f; setOnClickListener { act() } }
-        row(btn("Learn this sound (fan, hum)") { learnSound() }, btn("Block tapped band") { blockBand() })
-        val hold = Button(this).apply {
-            text = "Hold to learn a voice"; isAllCaps = false; textSize = 14f
-            setOnTouchListener { v, e ->
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        if (mic == null) fhStatus.text = "Start listening first."
-                        else { proc.post { startEnroll() }; text = "Listening to the voice... keep holding (~10 s)" }
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        text = "Hold to learn a voice"; proc.post { finishEnroll() }
-                        if (e.action == MotionEvent.ACTION_UP) v.performClick()
-                    }
-                }
-                true
-            }
+        engineNeural = btn("Neural") { FilteredHearing.setEngine(this, true); refreshFh() }
+        engineLight = btn("Light") { FilteredHearing.setEngine(this, false); refreshFh() }
+        col.addView(text("Engine: Neural (DeepFilterNet3 + a voice model; better, uses more battery, only while a " +
+            "voice mode is on) or Light (the classical filters).", 11f))
+        row(engineNeural, engineLight)
+
+        col.addView(text("Sounds", 15f, "#E8EDF2").apply { setPadding(0, dp(12), 0, dp(2)) })
+        suggestBtn = Button(this).apply { isAllCaps = false; visibility = View.GONE; setOnClickListener { learnSound() } }
+        col.addView(suggestBtn)
+        row(btn("Learn this sound (fan, hum, keyboard)") { learnSound() }, btn("Block tapped band") { blockBand() })
+        clicksBtn = btn("Remove clicks") {
+            clicksShown = !proc.clicksOn
+            val on = clicksShown; proc.post { clicksOn = on }; refreshFh()
         }
-        voiceBtn = btn("Remove that voice") {
-            if (proc.speaker == null) { fhStatus.text = "Learn a voice first: hold the button while they talk."; return@btn }
-            val m = if (proc.voiceMode == VoiceMode.TARGET) VoiceMode.OFF else VoiceMode.TARGET
-            proc.post { voiceMode = m }; voiceModeShown = m; refreshFh()
-        }
-        row(hold, voiceBtn)
-        allSpeechBtn = btn("Remove all speech") {
-            val m = if (proc.voiceMode == VoiceMode.ALL_SPEECH) VoiceMode.OFF else VoiceMode.ALL_SPEECH
-            proc.post { voiceMode = m }; voiceModeShown = m; refreshFh()
-        }
-        row(allSpeechBtn, btn("Clear filters") {
-            proc.post { setNoise(null); clearBands(); voiceMode = VoiceMode.OFF }
-            voiceModeShown = VoiceMode.OFF; FilteredHearing.clearEvent(); refreshFh()
+        row(clicksBtn, btn("Clear filters") {
+            proc.post { setNoise(null); clearBands(); voiceMode = VoiceMode.OFF; clicksOn = false }
+            FilteredHearing.setMode(VoiceMode.OFF); FilteredHearing.setOwnVoice(false); clicksShown = false
+            FilteredHearing.clearEvent(); refreshFh()
         })
+
+        col.addView(text("Voices", 15f, "#E8EDF2").apply { setPadding(0, dp(12), 0, dp(2)) })
+        allSpeechBtn = btn("Remove all speech") { toggleMode(VoiceMode.ALL_SPEECH) }
+        voicesOnlyBtn = btn("Voices only") {
+            if (!FilteredHearing.neuralEngine) { fhStatus.text = "Voices only needs the Neural engine."; return@btn }
+            toggleMode(VoiceMode.VOICES_ONLY)
+        }
+        row(allSpeechBtn, voicesOnlyBtn)
+        val amountLabel = text("", 13f, "#E8EDF2"); col.addView(amountLabel)
+        fun showAmount(v: Int) { amountLabel.text = "How much to take out (neural): $v %" }
+        col.addView(SeekBar(this).apply {
+            max = 100; progress = amountSlider; showAmount(amountSlider)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, v: Int, fromUser: Boolean) {
+                    amountSlider = v; showAmount(v); FilteredHearing.setAmount(v / 100.0)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)))
+        voiceBtn = btn("Remove that voice") {
+            if (!FilteredHearing.hasVoice("that")) { fhStatus.text = "Learn a voice first: hold the button while they talk."; return@btn }
+            toggleMode(VoiceMode.TARGET)
+        }
+        row(holdButton("Hold to learn a voice", "that"), voiceBtn)
+        ownBtn = btn("Remove my voice") {
+            if (!FilteredHearing.neuralEngine) { fhStatus.text = "Remove my voice needs the Neural engine."; return@btn }
+            if (!FilteredHearing.ownVoice && !FilteredHearing.hasVoice("me")) { fhStatus.text = "Learn your voice first: hold the button and talk for about 10 s."; return@btn }
+            FilteredHearing.setOwnVoice(!FilteredHearing.ownVoice); refreshFh()
+        }
+        row(holdButton("Hold to learn my voice", "me"), ownBtn)
+        col.addView(text("Your own voice: you mostly hear it through your skull (bone conduction), and the sealed ear " +
+            "tips make that louder (occlusion). No app can remove that part. \"Remove my voice\" only takes out the part " +
+            "the AirPods' mics pick up and play back to you.", 11f))
+        row(btn("Forget learned sound") { FilteredHearing.forgetSound(); refreshFh() },
+            btn("Forget voices") { FilteredHearing.forgetVoices(); refreshFh() })
         fhStatus = text("", 13f, "#99FFBB"); col.addView(fhStatus)
         col.addView(text("Safety: the room sound is limited to well under music level and fades in; if a whistle " +
             "(feedback) builds up it is muted at once. Turning it off puts the AirPods back in the mode they were in; " +
-            "Conversation Awareness comes back when listening stops. Expect a delay (Bluetooth both ways), so it suits " +
-            "steady background, not lip-sync.", 11f))
+            "Conversation Awareness comes back when listening stops. Expect a delay (Bluetooth both ways, plus 30 ms " +
+            "for the neural filter), so it suits background, not lip-sync.", 11f))
         refreshFh()
     }
 
-    /** What the buttons show; posted settings apply a moment later, so remember the voice mode we asked for. */
-    private var voiceModeShown: VoiceMode? = null
+    private fun holdButton(label: String, slot: String) = Button(this).apply {
+        text = label; isAllCaps = false; textSize = 14f
+        setOnTouchListener { v, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (mic == null) fhStatus.text = "Start listening first."
+                    else {
+                        FilteredHearing.startEnroll(slot)
+                        text = if (slot == "me") "Talk now... keep holding (~10 s)" else "Listening to the voice... keep holding (~10 s)"
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    text = label; FilteredHearing.finishEnroll()
+                    if (e.action == MotionEvent.ACTION_UP) v.performClick()
+                }
+            }
+            true
+        }
+    }
+
+    private fun toggleMode(m: VoiceMode) {
+        FilteredHearing.setMode(if (FilteredHearing.mode == m) VoiceMode.OFF else m)
+        refreshFh()
+    }
 
     private fun refreshFh() {
         if (!::fhBtn.isInitialized) return
@@ -191,9 +244,16 @@ class ListenActivity : Activity(), HeadMic.Listener {
             pendingOn -> "Starting... (waiting for the AirPods' mics)"
             else -> "Turn on filtered hearing"
         }
-        val vm = voiceModeShown ?: proc.voiceMode
+        val vm = FilteredHearing.mode
+        val n = FilteredHearing.neuralEngine
+        engineNeural.text = if (n) "Neural  \u2713" else "Neural"
+        engineLight.text = if (!n) "Light (battery)  \u2713" else "Light (battery)"
         voiceBtn.text = if (vm == VoiceMode.TARGET) "Removing that voice (tap: stop)" else "Remove that voice"
         allSpeechBtn.text = if (vm == VoiceMode.ALL_SPEECH) "Removing all speech (tap: stop)" else "Remove all speech"
+        voicesOnlyBtn.text = if (vm == VoiceMode.VOICES_ONLY) "Voices only (tap: stop)" else "Voices only"
+        ownBtn.text = if (FilteredHearing.ownVoice) "Removing my voice (tap: stop)" else "Remove my voice"
+        val clicks = clicksShown || proc.clicksOn
+        clicksBtn.text = if (clicks) "Removing clicks (tap: stop)" else "Remove clicks"
         fhStatus.text = FilteredHearing.describe()
     }
 
@@ -210,6 +270,7 @@ class ListenActivity : Activity(), HeadMic.Listener {
     private fun learnSound() {
         if (mic == null) { fhStatus.text = "Start listening first, then learn the sound while it is the main thing heard."; return }
         proc.post { learnNoise(3.0) }
+        clicksShown = false
         suggestBtn.visibility = View.GONE
         fhStatus.text = "Learning the sound for 3 s... keep quiet so only it is heard."
     }
@@ -253,7 +314,7 @@ class ListenActivity : Activity(), HeadMic.Listener {
                 "\n" + l.advice
         // Auto-suggest: a steady fan / hum / motor / air sound can be learned and taken out
         if (l != null && l.steady && proc.noise == null && Regex("fan|hum|motor|air|rumble|whine|hiss").containsMatchIn(l.label)) {
-            suggestBtn.text = "Block it: ${l.label} (learn it for 3 s)"
+            suggestBtn.text = "Block it: ${l.label} (learns it for 3 s: stay quiet)"
             suggestBtn.visibility = View.VISIBLE
         } else if (proc.noise != null) suggestBtn.visibility = View.GONE
     }

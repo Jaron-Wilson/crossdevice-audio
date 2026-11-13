@@ -169,12 +169,83 @@ class Limiter(rate: Int, var ceiling: Double) {
 }
 
 /** What "Learn this sound" found: tones to notch and the steady remainder's spectrum (power per STFT bin). */
-class NoiseLearn(val tonesHz: List<Double>, val profile: DoubleArray, val levelDb: Double) {
+class NoiseLearn(val tonesHz: List<Double>, val profile: DoubleArray, val levelDb: Double,
+                 /** Clicks heard while learning (keyboard, taps): their spectral shape over [ClickDetector.NB]
+                  *  bands, or null if it was a steady sound. */
+                 val clickTemplate: DoubleArray? = null, val clicksPerSec: Double = 0.0) {
     fun describe(): String {
         val t = tonesHz.sorted()
         return "steady noise at ${"%.0f".format(levelDb)} dBFS" +
-            if (t.isEmpty()) "" else ", plus tones at " + t.joinToString(", ") { "${"%.0f".format(it)} Hz" }
+            (if (t.isEmpty()) "" else ", plus tones at " + t.joinToString(", ") { "${"%.0f".format(it)} Hz" }) +
+            (if (clickTemplate == null) "" else ", plus clicks (${"%.1f".format(clicksPerSec)} a second: the click remover is on)")
     }
+}
+
+/**
+ * Clicks and taps (keyboard keys, a mouse, cutlery): a fast, classical transient detector on the STFT frames
+ * (4 ms hops). A click starts on a frame whose 1.5-12 kHz energy jumps 3 dB over the previous frame and stands
+ * 6 dB over a slow per-bin background (spectral flux and a short-time energy ratio); it lasts until the
+ * energy, both in that band and over the whole spectrum, falls back within 1.5 dB of the background, at most
+ * 60 ms. If a click shape was learned ("Learn this sound" on a keyboard), the jump must also match that shape
+ * over [NB] bands, so speech onsets are spared more often. During a click every bin above 60 Hz is pulled down
+ * to the background (spectral interpolation across the click), so what was under it (a voice, the room) stays.
+ * The background does not learn from clicks or the 12 ms after them.
+ */
+class ClickDetector(rate: Int, private val n: Int = HearingProcessor.N) {
+    companion object {
+        const val NB = 8
+        const val MAX_FRAMES = 15                       // 60 ms at 4 ms hops
+        const val AFTER = 3
+    }
+    private val bins = n / 2 + 1
+    val bg = DoubleArray(bins)
+    private var init = false
+    private var prevHf = 0.0
+    var hold = 0; private set
+    private var after = 0
+    var clicks = 0; private set
+    private val kLo = max(1, 60 * n / rate)
+    private val kHf0 = 1500 * n / rate
+    private val kHf1 = min(bins - 1, 12_000 * n / rate)
+    private val edges = IntArray(NB + 1) { b -> (500.0 * (14_000.0 / 500.0).pow(b.toDouble() / NB) * n / rate).toInt().coerceIn(1, bins - 1) }
+    /** The last onset's excess over the background, log per band, unit length. */
+    val shape = DoubleArray(NB)
+
+    /** One frame's power per bin; returns whether it is (part of) a click. */
+    fun step(p: DoubleArray, template: DoubleArray?): Boolean {
+        if (!init) { System.arraycopy(p, 0, bg, 0, bins); init = true; prevHf = hfOf(p); return false }
+        val hf = hfOf(p); var bgHf = 0.0
+        for (k in kHf0..kHf1) bgHf += bg[k]
+        var bgAll = 0.0; var pAll = 0.0
+        for (k in kLo until bins) { bgAll += bg[k]; pAll += p[k] }
+        val rise = hf / (prevHf + 1e-20); val above = hf / (bgHf + 1e-20)
+        prevHf = hf
+        if (hold > 0) { hold--; if (min(above, pAll / (bgAll + 1e-20)) < 1.4) hold = 0 }
+        if (hold == 0 && rise > 2.0 && above > 4.0) {
+            var nn = 0.0
+            for (b in 0 until NB) {
+                var sp = 0.0; var sb = 0.0
+                for (k in edges[b] until max(edges[b] + 1, edges[b + 1])) { sp += p[k]; sb += bg[k] }
+                shape[b] = log10(1 + max(0.0, sp - sb) / (sb + 1e-20)); nn += shape[b] * shape[b]
+            }
+            nn = sqrt(nn) + 1e-12
+            for (b in 0 until NB) shape[b] /= nn
+            var ok = true
+            if (template != null) { var c = 0.0; for (b in 0 until NB) c += shape[b] * template[b]; ok = c > 0.6 }
+            if (ok) { hold = MAX_FRAMES; clicks++ }
+        }
+        val click = hold > 0
+        if (click) after = AFTER else if (after > 0) after--
+        else for (k in 0 until bins) bg[k] += (if (p[k] > bg[k]) 0.03 else 0.15) * (p[k] - bg[k])
+        return click
+    }
+
+    /** Gain per bin that pulls a click down to the background. */
+    fun gains(p: DoubleArray, out: DoubleArray) {
+        for (k in 0 until bins) out[k] = if (k < kLo) 1.0 else min(1.0, sqrt(bg[k] / (p[k] + 1e-20))).coerceAtLeast(0.03)
+    }
+
+    private fun hfOf(p: DoubleArray): Double { var s = 0.0; for (k in kHf0..kHf1) s += p[k]; return s }
 }
 
 /**
@@ -220,7 +291,8 @@ class SpeakerModel(val mean: DoubleArray, val std: DoubleArray, val threshold: D
     }
 }
 
-enum class VoiceMode { OFF, TARGET, ALL_SPEECH }
+/** OFF; TARGET: the enrolled voice; ALL_SPEECH: every voice; VOICES_ONLY: everything but voices (neural only). */
+enum class VoiceMode { OFF, TARGET, ALL_SPEECH, VOICES_ONLY }
 
 /**
  * The filtered-hearing processor. Feed 32 kHz samples with [process]; it outputs as many, [LATENCY] samples
@@ -239,7 +311,7 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
 
         /** Find tones (local peaks 10 dB above the surrounding median, 40 Hz..4 kHz) and the steady
          *  remainder's spectrum, from a few seconds of the sound alone. */
-        fun analyzeNoise(raw: DoubleArray, rate: Int = 32_000, maxTones: Int = 8): NoiseLearn {
+        fun analyzeNoise(raw: DoubleArray, rate: Int = 32_000, maxTones: Int = 8, clicks: Boolean = true): NoiseLearn {
             val nfft = 8192
             val half = nfft / 2
             val w = DoubleArray(nfft) { 0.5 - 0.5 * cos(2 * PI * it / nfft) }
@@ -276,18 +348,33 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
             val bank = NotchBank(rate).apply { for (f in picked) add(f, NotchBank.toneQ(f), true) }
             val ch = StftChannel()
             val prof = DoubleArray(BINS)
+            val pw1 = DoubleArray(BINS)
             var frames = 0
             var sq = 0.0
+            // clicks (a keyboard): found the way the processor finds them; their frames stay out of the steady
+            // profile (so it is the sound between the clicks), and their shape becomes a template
+            val det = ClickDetector(rate)
+            val tmpl = DoubleArray(ClickDetector.NB)
+            var after = 0
             for ((i, x) in raw.withIndex()) {
                 val v = bank.process(x)
                 sq += x * x
                 if (ch.push(v) && i > N * 4) {             // skip the notches' start-up
-                    for (k in 0 until BINS) prof[k] += ch.re[k] * ch.re[k] + ch.im[k] * ch.im[k]
-                    frames++
+                    for (k in 0 until BINS) pw1[k] = ch.re[k] * ch.re[k] + ch.im[k] * ch.im[k]
+                    val before = det.clicks
+                    val click = det.step(pw1, null)
+                    if (det.clicks > before) for (b in 0 until ClickDetector.NB) tmpl[b] += det.shape[b]
+                    if (click && clicks) after = 3 else if (after > 0) after--
+                    else { for (k in 0 until BINS) prof[k] += pw1[k]; frames++ }
                 }
             }
             if (frames > 0) for (k in 0 until BINS) prof[k] /= frames
-            return NoiseLearn(picked, prof, 10 * log10(sq / max(1, raw.size) + 1e-12))
+            val secs = raw.size.toDouble() / rate
+            val rateClicks = det.clicks / secs
+            val template = if (clicks && det.clicks >= 3 && rateClicks >= 0.7) {
+                val nn = sqrt(tmpl.sumOf { it * it }) + 1e-12; DoubleArray(ClickDetector.NB) { tmpl[it] / nn }
+            } else null
+            return NoiseLearn(picked, prof, 10 * log10(sq / max(1, raw.size) + 1e-12), template, rateClicks)
         }
     }
 
@@ -295,7 +382,8 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
     data class Status(
         val inDb: Double = -120.0, val outDb: Double = -120.0, val removedDb: Double = 0.0,
         val speech: Boolean = false, val target: Boolean = false, val pitchHz: Double = 0.0,
-        val howls: Int = 0, val learning: Double = -1.0, val enrolling: Double = -1.0)
+        val howls: Int = 0, val learning: Double = -1.0, val enrolling: Double = -1.0,
+        val clicks: Int = 0, val neural: Boolean = false, val gate: Double = 0.0)
 
     interface Events {
         fun onLearned(r: NoiseLearn) {}
@@ -317,6 +405,12 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
     var bands: List<Pair<Double, Double>> = emptyList(); private set
     var voiceMode = VoiceMode.OFF
     var speaker: SpeakerModel? = null
+    /** Neural modes: how much to take out (0..1): speech for Remove all speech / a voice, the rest for Voices only. */
+    var amount = 1.0
+    /** Neural speech removal: how hard to also cut what is left where the speech estimate dominates. */
+    var residualCut = 8.0
+    /** The click (keyboard) remover; on by itself when a learned sound had clicks. */
+    var clicksOn = false
     /** Linear gain of the room sound in the output (the Mix slider). */
     var mix = 0.5
     var limiterCeiling: Double
@@ -332,6 +426,7 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
 
     fun setNoise(n: NoiseLearn?) {
         noise = n
+        clicksOn = n?.clickTemplate != null
         for (c in chains) { c.notch.notches.removeAll { it.adaptive }; n?.tonesHz?.forEach { c.notch.add(it, NotchBank.toneQ(it), true) } }
         java.util.Arrays.fill(ddPrev, 0.0)
     }
@@ -383,6 +478,14 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
     private val psm = DoubleArray(BINS)
     private var floorInit = false
     private val speechG = DoubleArray(BINS) { 1.0 }
+    private val rsG = DoubleArray(BINS) { 1.0 }
+    private val clickG = DoubleArray(BINS)
+    private val clickP = DoubleArray(BINS)
+    internal val clickDet = ClickDetector(rate)
+    private val side = StftChannel()
+    private var gateNow = 0.0
+    private var sideOn = false
+    private var dip = -1
     private var capture: DoubleArray? = null
     private var capPos = 0
     private var enrollFrames: MutableList<DoubleArray>? = null
@@ -435,6 +538,13 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
 
     fun process(x: DoubleArray, n: Int, out: DoubleArray) = runBlock(x, n, out, null, null)
 
+    /** With the neural front: [x] the input (delayed to match), [e] the speech estimate, [g] the voice gate. */
+    fun process(x: DoubleArray, e: DoubleArray, g: DoubleArray, n: Int, out: DoubleArray) =
+        runBlock(x, n, out, null, null, e, g)
+
+    /** The input path is about to change (neural front on/off, a 30 ms jump in time): a quick 50 ms dip. */
+    fun dip() { dip = 0 }
+
     /** Tests: [mix] through the processor, and each of [parts] through the same filters with the gains the
      *  mix produced. Returns the mix's output and each part's (parts' outputs skip the output stage). */
     fun processShadow(mix: DoubleArray, parts: List<DoubleArray>, block: Int = 256): Pair<DoubleArray, List<DoubleArray>> {
@@ -457,8 +567,10 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
 
     private fun drain() { while (true) (cmds.poll() ?: break).invoke() }
 
-    private fun runBlock(x: DoubleArray, n: Int, out: DoubleArray, parts: List<DoubleArray>?, partsOut: List<DoubleArray>?) {
+    private fun runBlock(x: DoubleArray, n: Int, out: DoubleArray, parts: List<DoubleArray>?, partsOut: List<DoubleArray>?,
+                         e: DoubleArray? = null, g: DoubleArray? = null) {
         drain()
+        sideOn = e != null
         val fadeIn = 1.0 / rate; val fadeOut = 1.0 / (0.3 * rate)
         for (i in 0 until n) {
             val xi = x[i]
@@ -476,6 +588,7 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
             hist[histPos] = v; histPos = (histPos + 1) % PITCH_N
             var y = main.stft.pop()
             val ready = main.stft.push(v)
+            if (e != null) { side.push(e[i]); gateNow = g?.get(i) ?: 0.0 }
             if (parts != null && partsOut != null) for (s in shadowChains.indices) {
                 val c = shadowChains[s]
                 partsOut[s][i] = c.stft.pop()
@@ -492,7 +605,13 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
                 fade = if (enabled) min(1.0, fade + fadeIn) else max(0.0, fade - fadeOut)
                 if (duckHold > 0) { duckHold--; duck = max(0.0, duck - 1.0 / 160) }
                 else duck = min(1.0, duck + 1.0 / rate)
-                y = limiter.process(y * mix * fade * duck)
+                var dg = 1.0
+                if (dip >= 0) {                                     // 4 ms down, 36 ms silent, 10 ms up
+                    val ms = dip * 1000.0 / rate
+                    dg = when { ms < 4 -> 1 - ms / 4; ms < 40 -> 0.0; ms < 50 -> (ms - 40) / 10; else -> { dip = -2; 1.0 } }
+                    dip++
+                }
+                y = limiter.process(y * mix * fade * duck * dg)
             }
             out[i] = y
             outSq += y * y
@@ -500,7 +619,8 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
                 status = status.copy(inDb = 10 * log10(inSq / meterN + 1e-12), outDb = 10 * log10(outSq / meterN + 1e-12),
                     removedDb = removedDb, speech = hang > 0, target = targetNow && hang > 0, pitchHz = pitchHz, howls = howls,
                     learning = capture?.let { capPos.toDouble() / it.size } ?: -1.0,
-                    enrolling = enrollFrames?.let { it.size * HOP.toDouble() / rate } ?: -1.0)
+                    enrolling = enrollFrames?.let { it.size * HOP.toDouble() / rate } ?: -1.0,
+                    clicks = clickDet.clicks, neural = sideOn, gate = gateNow)
                 inSq = 0.0; outSq = 0.0; meterN = 0
             }
         }
@@ -508,6 +628,7 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
 
     private fun frame() {
         val re = main.stft.re; val im = main.stft.im
+        if (sideOn) neuralMix(re, im)
         val prof = if (noiseOn) noise?.profile else null
         var sIn = 0.0; var sOut = 0.0
         // 1) learned steady noise: decision-directed Wiener against the profile (over-subtracted 1.5x, floor -24 dB)
@@ -525,6 +646,14 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
             sIn += p; sOut += pow1[k]
         }
         if (sIn > 0) removedDb += 0.02 * (10 * log10(sIn / (sOut + 1e-20)) - removedDb)
+        // 1b) clicks: detected on the frame as it came in, pulled down to the background around them
+        if (clicksOn) {
+            for (k in 0 until BINS) clickP[k] = re[k] * re[k] + im[k] * im[k]
+            if (clickDet.step(clickP, if (noiseOn) noise?.clickTemplate else null)) {
+                clickDet.gains(clickP, clickG)
+                for (k in 0 until BINS) { gain[k] *= clickG[k]; pow1[k] *= clickG[k] * clickG[k] }
+            }
+        }
         // 2) background floor of what remains (continuous minimum tracking; rises 3 dB/s, 0.5 dB/s in speech)
         val rise = if (hang > 0) RISE_SPEECH else RISE
         //    on power smoothed over ~25 ms; the minimum of that sits ~3 dB under the mean, so x2
@@ -556,10 +685,10 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
         }
         // 4) remove speech: in the speech band, cut what stands above the background floor
         val sp = speaker
-        val remove = hang > 0 && when (voiceMode) {
+        val remove = !sideOn && hang > 0 && when (voiceMode) {
             VoiceMode.ALL_SPEECH -> true
             VoiceMode.TARGET -> sp != null && targetNow
-            VoiceMode.OFF -> false
+            VoiceMode.OFF, VoiceMode.VOICES_ONLY -> false
         }
         for (k in 0 until BINS) {
             val tgt = if (remove && k in BIN_80..BIN_8000) sqrt(min(1.0, 2.0 * floorN[k] / (pow1[k] + 1e-20))).coerceAtLeast(0.05) else 1.0
@@ -570,6 +699,60 @@ class HearingProcessor(val rate: Int = 32_000, shadows: Int = 0) {
         if (howlGuard && outputStage) howlCheck(re, im)
         pIn = sIn; pOut = sOut
     }
+
+    /**
+     * The neural part of a frame, on the complex spectrum: out = X - c*E - v*(X - E), with E the speech estimate.
+     * c (speech to take out) is [amount] for all speech, [amount] x the voice gate for an enrolled voice; v (the
+     * rest to take out) is [amount] for Voices only.
+     *
+     * Where speech is taken out, the estimate never holds all of it, so the residual R = X - E is cut further in
+     * the bins where speech is (|E|^2, held with a ~20 ms decay, above the room's floor): to the room's own level
+     * there (the floor: minimum statistics of R over 1.5 s), and by a Wiener-like |R|^2 / (|R|^2 + k|E|^2),
+     * whichever is lower (floor -34 dB). Tuned on LibriSpeech in a synthetic room: speech -27 dB with the
+     * room 14 dB under it, -19 dB with the room 5 dB under it, while the room itself loses 3-5 dB.
+     */
+    private fun neuralMix(re: DoubleArray, im: DoubleArray) {
+        val er = side.re; val ei = side.im
+        val c = when (voiceMode) {
+            VoiceMode.ALL_SPEECH -> amount
+            else -> amount * gateNow                    // the gate is 0 unless an enrolled voice is being removed
+        }
+        val v = if (voiceMode == VoiceMode.VOICES_ONLY) amount else 0.0
+        // the room's level under the speech: minimum statistics of the residual (smoothed over ~25 ms, the
+        // minimum over the last 1.5 s in six 0.25 s pieces; x2 because a minimum sits under the mean)
+        val cur = subMin[subIdx]
+        for (k in 0 until BINS) {
+            val rr = re[k] - er[k]; val ri = im[k] - ei[k]
+            rSm[k] += 0.15 * (rr * rr + ri * ri - rSm[k])
+            if (rSm[k] < cur[k]) cur[k] = rSm[k]
+            var m = cur[k]
+            for (u in subMin.indices) if (subMin[u][k] < m) m = subMin[u][k]
+            rFloor[k] = 2 * m
+        }
+        if (++subCount >= SUB_FRAMES) { subCount = 0; subIdx = (subIdx + 1) % subMin.size; java.util.Arrays.fill(subMin[subIdx], Double.MAX_VALUE) }
+        for (k in 0 until BINS) {
+            val rr = re[k] - er[k]; val ri = im[k] - ei[k]
+            var or = re[k] - c * er[k] - v * rr; var oi = im[k] - c * ei[k] - v * ri
+            val ss = max(er[k] * er[k] + ei[k] * ei[k], 0.8 * ssH[k]); ssH[k] = ss
+            if (c > 0) {
+                val nn = rr * rr + ri * ri
+                val wiener = nn / (nn + residualCut * ss + 1e-20)
+                val toFloor = if (ss > rFloor[k]) sqrt(rFloor[k] / (nn + 1e-20)) else 1.0
+                val t = min(1.0, min(wiener, toFloor)).coerceAtLeast(0.02)
+                val tc = 1 - c + c * t
+                rsG[k] = if (tc < rsG[k]) tc else rsG[k] + 0.35 * (tc - rsG[k])
+                or *= rsG[k]; oi *= rsG[k]
+            } else rsG[k] = 1.0
+            re[k] = or; im[k] = oi
+        }
+    }
+    private val ssH = DoubleArray(BINS)
+    private val rSm = DoubleArray(BINS)
+    private val rFloor = DoubleArray(BINS)
+    private val SUB_FRAMES = (0.25 * rate / HOP).toInt()
+    private val subMin = Array(6) { DoubleArray(BINS) { Double.MAX_VALUE } }
+    private var subIdx = 0
+    private var subCount = 0
 
     /** Pitch (Hz) and confidence (normalised autocorrelation 0..1), from the last 32 ms after the notches,
      *  with the learned noise and the background floor subtracted, band-limited to 60..1200 Hz. */
