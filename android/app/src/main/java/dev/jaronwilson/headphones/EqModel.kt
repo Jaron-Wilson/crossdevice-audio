@@ -148,9 +148,23 @@ object EqModel {
     fun dpBands(bands: List<Band>, gains: List<Double>, n: Int): List<Pair<Double, Double>> =
         (0 until n).map { i -> freqAt((i + 1.0) / n) to responseDb(bands, gains, freqAt((i + 0.5) / n)) }
 
-    /** True while the sub band is boosted (Rumble): the low-band compressor runs then. */
+    /** True while the sub band is boosted (Rumble): the subsonic high-pass runs then. */
     fun subBoosted(bands: List<Band>, gains: List<Double>): Boolean =
         bands.indexOfFirst { it.key == "sub" }.let { it >= 0 && gains.getOrElse(it) { 0.0 } > 0 }
+
+    /** True while the bass or the sub band is boosted: the low-band compressor runs then, as in the laptop's
+     *  hp_eq.low_boosted(), so a bass boost doesn't make the limiter duck the whole mix. */
+    fun lowBoosted(bands: List<Band>, gains: List<Double>): Boolean =
+        bands.withIndex().any { (i, b) -> b.key in setOf("bass", "sub") && gains.getOrElse(i) { 0.0 } > 0 }
+
+    /** The low-band compressor, the same numbers as the laptop (hp_eq.LOWCOMP_CONTROL): below [LOWCOMP_HZ],
+     *  -8 dBFS, 4:1, attack 5 ms, release 150 ms, 6 dB knee, no makeup gain. */
+    const val LOWCOMP_HZ = 120f
+    const val LOWCOMP_THRESHOLD_DB = -8f
+    const val LOWCOMP_RATIO = 4f
+    const val LOWCOMP_ATTACK_MS = 5f
+    const val LOWCOMP_RELEASE_MS = 150f
+    const val LOWCOMP_KNEE_DB = 6f
 
     // ---- filter math ----
     private const val FS = 48000.0

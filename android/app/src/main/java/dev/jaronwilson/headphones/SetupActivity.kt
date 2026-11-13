@@ -72,6 +72,11 @@ class SetupActivity : Activity() {
     private var phDraft: List<String>? = null
     private lateinit var crBox: LinearLayout
     private lateinit var crBassOn: Switch
+    private lateinit var crBass: SeekBar
+    private lateinit var crBassText: TextView
+    private val apModeBtns = LinkedHashMap<String, Button>()
+    private val crModeBtns = LinkedHashMap<String, Button>()
+    private lateinit var apEar: TextView
     private val crSwitches = LinkedHashMap<String, Switch>()
     private var lastEqPush = 0L
 
@@ -142,6 +147,18 @@ class SetupActivity : Activity() {
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
     }
 
+    private fun modeRow(into: LinkedHashMap<String, Button>, modes: List<Pair<String, String>>, onPick: (String) -> Unit) =
+        LinearLayout(this).apply {
+            for ((k, t) in modes) addView(Button(this@SetupActivity).apply {
+                text = t; isAllCaps = false; textSize = 12f
+                setOnClickListener { colorModes(into, k); onPick(k) }
+            }.also { into[k] = it }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        }
+
+    private fun colorModes(btns: Map<String, Button>, cur: String?) {
+        for ((k, b) in btns) b.setTextColor(Color.parseColor(if (k == cur) "#5FD0FF" else "#E8EDF2"))
+    }
+
     private fun seek(max: Int, onDone: (Int) -> Unit) = SeekBar(this).apply {
         this.max = max
         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -177,6 +194,10 @@ class SetupActivity : Activity() {
         apBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
         apBox.addView(label("AirPods", 15f, "#E8EDF2"))
         val ap = card()
+        ap.addView(label("Noise mode", 13f, "#E8EDF2"))
+        ap.addView(modeRow(apModeBtns, listOf("off" to "Off", "anc" to "ANC", "transparency" to "Clear", "adaptive" to "Adaptive")) { setApMode(it) })
+        apEar = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")) }
+        ap.addView(apEar)
         ap.addView(label("Block noise", 13f, "#E8EDF2"))
         ap.addView(TextView(this).apply {
             text = "Your AirPods listen with their own mics and adjust automatically."
@@ -244,6 +265,22 @@ class SetupActivity : Activity() {
         crBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
         crBox.addView(label("Crusher ANC 2", 15f, "#E8EDF2"))
         val cr = card()
+        cr.addView(label("Noise mode", 13f, "#E8EDF2"))
+        cr.addView(modeRow(crModeBtns, listOf("anc" to "ANC", "transparency" to "Clear", "off" to "Off")) { setCrMode(it) })
+        cr.addView(TextView(this).apply {
+            text = "The Crusher has no adaptive mode and reports no outside-noise level, so these are set by you " +
+                "(or by Smart adaptive below, from the phone's motion sensors)."
+            textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(4), 0, dp(4))
+        })
+        crBassText = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#E8EDF2")); setPadding(0, dp(8), 0, 0) }
+        cr.addView(crBassText)
+        crBass = seek(10) { v -> setCrBass(v) }
+        crBass.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, v: Int, fromUser: Boolean) { crBassText.text = "Sensory bass level: $v / 10" }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) { if (!binding) setCrBass(sb.progress) }
+        })
+        cr.addView(crBass)
         crBassOn = switch("Sensory bass (haptic) on") { on -> setCr("bass_on", on) }
         cr.addView(crBassOn)
         crRumble = switch("Rumble (Sensory Bass max; off puts your level back)") { on -> crRumble(on) }
@@ -395,9 +432,13 @@ class SetupActivity : Activity() {
                 panel?.optJSONObject("airpods")?.optBoolean("online") == true -> panel.optJSONObject("airpods")?.optJSONObject("settings")
                 else -> null
             }
+            val apMode: String? = when {
+                onPhone && PhoneDirect.status(app) != "fail" -> runCatching { PhoneDirect.mode(app) }.getOrNull()
+                else -> panel?.optJSONObject("airpods")?.optString("mode")?.takeIf { it.isNotEmpty() && it != "null" }
+            }
             val cr: JSONObject? = if (CrusherDirect.connected(app)) runCatching { CrusherDirect.state(app) }.getOrNull()
                 else panel?.optJSONObject("crusher")?.takeIf { it.optBoolean("online") }
-            runOnUiThread { bindControls(apSet, onPhone, cr) }
+            runOnUiThread { bindControls(apSet, onPhone, cr); colorModes(apModeBtns, apMode); bindEar(onPhone) }
         }
     }
 
@@ -421,6 +462,9 @@ class SetupActivity : Activity() {
         }
         crBox.visibility = if (cr != null) View.VISIBLE else View.GONE
         if (cr != null) {
+            colorModes(crModeBtns, when { cr.optBoolean("anc") -> "anc"; cr.optBoolean("transparency") -> "transparency"; else -> "off" })
+            if (cr.has("bass")) crBass.progress = cr.optInt("bass")
+            crBassText.text = if (cr.has("bass")) "Sensory bass level: ${crBass.progress} / 10" else "Sensory bass level: unknown"
             crBassOn.visibility = if (cr.has("bass_on")) View.VISIBLE else View.GONE
             crBassOn.isChecked = cr.optBoolean("bass_on")
             crRumble.isChecked = CrusherDirect.rumbleOn(this) || cr.optJSONObject("rumble")?.optBoolean("crusher") == true
@@ -503,6 +547,38 @@ class SetupActivity : Activity() {
         }
     }
 
+    /** What the AirPods last reported about themselves: in ear / in case (AAP 0x06, sensed by the buds). */
+    private fun bindEar(onPhone: Boolean) {
+        val e = if (onPhone) PhoneDirect.ear(this) else null
+        apEar.text = e?.let { (pair, t) ->
+            "Ears: ${PhoneDirect.earText(pair)} (reported by the AirPods " +
+                android.text.format.DateUtils.getRelativeTimeSpanString(t) + ")" } ?: ""
+    }
+
+    private fun setCrMode(mode: String) {
+        val app = applicationContext
+        io.execute {
+            val r = runCatching {
+                if (CrusherDirect.connected(app)) CrusherDirect.setMode(app, mode)
+                else HeadphonesWidget.post(app, "/api/crusher/mode", mode)
+            }
+            r.exceptionOrNull()?.let { toast("Crusher: ${it.message}") }
+            loadControls()
+        }
+    }
+
+    private fun setCrBass(level: Int) {
+        val app = applicationContext
+        io.execute {
+            val r = runCatching {
+                if (CrusherDirect.connected(app)) CrusherDirect.setBass(app, level)
+                else HeadphonesWidget.post(app, "/api/crusher/bass", level.toString())
+            }
+            r.exceptionOrNull()?.let { toast("Crusher: ${it.message}") }
+            loadControls()
+        }
+    }
+
     /** Reopens the AAP link (not Bluetooth) so the AirPods report their settings again. */
     private fun readBack() {
         val app = applicationContext
@@ -559,6 +635,13 @@ class SetupActivity : Activity() {
             }
             setOnClickListener { startActivity(Intent(this@SetupActivity, TrackActivity::class.java)) }
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(60)).apply { bottomMargin = dp(6) })
+        col.addView(Button(this).apply {
+            text = "What your AirPods hear"; isAllCaps = false; textSize = 16f; setTextColor(Color.WHITE)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#5A4A8A")); cornerRadius = dp(16).toFloat()
+            }
+            setOnClickListener { startActivity(Intent(this@SetupActivity, ListenActivity::class.java)) }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, dp(54)).apply { bottomMargin = dp(6) })
         buildControls(col)
         col.addView(label("Setup", 15f, "#E8EDF2"))
         col.addView(label("Control your AirPods noise modes and see their battery from a home-screen widget. " +

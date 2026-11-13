@@ -59,6 +59,12 @@
             android:launchMode="singleTop"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
 
+        <!-- What your AirPods hear: their own mics over AAP (no call mode), only while this screen is open -->
+        <activity
+            android:name=".ListenActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
         <!-- Last seen: map, history, permissions -->
         <activity
             android:name=".TrackActivity"

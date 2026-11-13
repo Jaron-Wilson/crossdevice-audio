@@ -76,6 +76,49 @@ object PhoneDirect {
     }
 
     private val NOTIFY = hex("040004000F00FFFFFEFF")
+
+    /** Open the AirPods' AAP channel and do the opening sequence (handshake, features, notifications).
+     *  For a long session that the caller owns (the headphone-mic listener); the caller closes it. */
+    fun openAap(context: Context): BluetoothSocket {
+        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: error("no Bluetooth")
+        val mac = Config.airpodsMac(context).ifEmpty { error("Pick your AirPods in the Headphones app") }
+        val sock = socket(adapter.getRemoteDevice(mac))
+        try {
+            sock.connect()
+            val out = sock.outputStream
+            out.write(HANDSHAKE); out.flush(); Thread.sleep(250)
+            out.write(FEATURES); out.flush(); Thread.sleep(150)
+            out.write(NOTIFY); out.flush()
+        } catch (e: Throwable) { runCatching { sock.close() }; throw e }
+        return sock
+    }
+
+    fun modePacket(mode: String): ByteArray = hex("0400040009000D") + byteArrayOf(MODE.getValue(mode).toByte(), 0, 0, 0)
+    fun controlPacket(id: Int, v: Int): ByteArray = hex("040004000900") + byteArrayOf(id.toByte(), v.toByte(), 0, 0, 0)
+
+    /** Ear detection report 04 00 04 00 06 00 <primary> <secondary>: 0 in ear, 1 out of ear, 2 in case.
+     *  Returns the pair, or null. The AirPods compute this themselves (LibrePods "AAP Definitions"). */
+    fun earFrom(p: ByteArray, n: Int): Pair<Int, Int>? {
+        for (i in 0..n - 8) if (p[i] == 0x04.toByte() && p[i + 1] == 0.toByte() && p[i + 2] == 0x04.toByte() &&
+            p[i + 3] == 0.toByte() && p[i + 4] == 0x06.toByte() && p[i + 5] == 0.toByte())
+            return (p[i + 6].toInt() and 0xFF) to (p[i + 7].toInt() and 0xFF)
+        return null
+    }
+
+    fun earText(e: Pair<Int, Int>): String {
+        val w = mapOf(0 to "in ear", 1 to "out of ear", 2 to "in case")
+        return if (e.first == e.second) "both ${w[e.first] ?: "?"}" else "one ${w[e.first] ?: "?"}, one ${w[e.second] ?: "?"}"
+    }
+
+    fun rememberEar(context: Context, e: Pair<Int, Int>) =
+        prefs(context).edit().putString("ear", "${e.first},${e.second}").putLong("ear_t", System.currentTimeMillis()).apply()
+
+    /** The last ear-detection report and when it came, or null. */
+    fun ear(context: Context): Pair<Pair<Int, Int>, Long>? {
+        val s = prefs(context).getString("ear", null) ?: return null
+        val (a, b) = s.split(",").map { it.toInt() }
+        return (a to b) to prefs(context).getLong("ear_t", 0)
+    }
     private val NAMES = mapOf(1 to "off", 2 to "anc", 3 to "transparency", 4 to "adaptive")
 
     /** name -> (control id, kind). kind: "bool" (1 on / 2 off), "level" (0-100), "mask" (modes). */
@@ -140,6 +183,7 @@ object PhoneDirect {
                         // Last seen / finder: the battery packet and the IRK reply (see Tracker)
                         AapTrack.batteryFrom(buf, n)?.let { Tracker.rememberBattery(context, Tracker.AIRPODS, it) }
                         AapTrack.irkFrom(buf, n)?.let { Tracker.rememberIrk(context, it) }
+                        earFrom(buf, n)?.let { rememberEar(context, it) }
                         for (i in 0..n - 8) {
                             if (buf[i] == 0x04.toByte() && buf[i + 1] == 0.toByte() && buf[i + 2] == 0x04.toByte() &&
                                 buf[i + 3] == 0.toByte() && buf[i + 4] == 0x09.toByte() && buf[i + 5] == 0.toByte()) {

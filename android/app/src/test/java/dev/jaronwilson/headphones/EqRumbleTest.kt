@@ -60,3 +60,27 @@ class EqRumbleMaxTest {
         assertTrue("mids stay near 0: $at1k", kotlin.math.abs(at1k) < 1.0)
     }
 }
+
+/** 1.5.0: the phone's low-band compressor follows the laptop (hp_eq.low_boosted / LOWCOMP_CONTROL). */
+class EqLaptopParityTest {
+    private val bands = listOf(
+        EqModel.Band("bass", "Bass", "lowshelf", 80.0, 0.707),
+        EqModel.Band("lowmid", "Low-mid", "peaking", 250.0, 1.0),
+        EqModel.Band("mid", "Mid", "peaking", 1000.0, 1.0),
+        EqModel.Band("highmid", "High-mid", "peaking", 3500.0, 1.0),
+        EqModel.Band("treble", "Treble", "highshelf", 10000.0, 0.707),
+        EqModel.Band("sub", "Sub", "peaking", 45.0, 0.8))
+
+    @Test fun compressorOnForBassBoostToo() {
+        assertTrue(EqModel.lowBoosted(bands, listOf(6.0, 2.0, 0.0, 0.0, 0.0, 0.0)))   // Bass boost preset
+        assertTrue(EqModel.lowBoosted(bands, listOf(6.0, 0.0, 0.0, 0.0, 0.0, 12.0)))  // Rumble
+        assertTrue(!EqModel.lowBoosted(bands, listOf(0.0, 0.0, 0.0, 2.0, 5.0, 0.0)))  // Treble
+        assertTrue(!EqModel.lowBoosted(bands, listOf(-3.0, -1.0, 2.0, 4.0, 1.0, 0.0))) // Vocal (bass cut)
+    }
+
+    @Test fun compressorNumbersMatchLaptop() {
+        assertEquals(-8f, EqModel.LOWCOMP_THRESHOLD_DB, 0f)
+        assertEquals(4f, EqModel.LOWCOMP_RATIO, 0f)
+        assertEquals(120f, EqModel.LOWCOMP_HZ, 0f)
+    }
+}
