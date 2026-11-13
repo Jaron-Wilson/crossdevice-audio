@@ -1,11 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- to notice the AirPods connecting to this phone (hand-off with the laptop) -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- read the AirPods' battery broadcast on the phone itself (no location use) -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <!-- source-side EQ: audiofx effects held by a foreground service -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Smart adaptive: "are you walking" from the phone's motion sensors (asked when you turn it on) -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <!-- optional sub-option only (call -> transparency); requested at runtime only if you turn it on -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Live Translation: the AirPods' mics (only while you have it on), as a microphone foreground service -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- package visibility: the phone's speech recognizer and text-to-speech engine -->
+    <queries>
+        <intent><action android:name="android.speech.RecognitionService" /></intent>
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+    </queries>
 
     <application
         android:label="Headphones"
@@ -23,6 +43,30 @@
             </intent-filter>
         </activity>
 
+        <!-- Live Translation screen (the widget's Translate button opens it with a toggle) -->
+        <activity
+            android:name=".TranslateActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Live Translation: holds the AirPods' mic (Bluetooth SCO) while a session runs -->
+        <service
+            android:name=".LiveTranslateService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- No analytics: ML Kit ships Google's event-logging backend (Firebase "CCT" transport). Removing
+             its registration means the transport has no backend and drops those events on the phone. -->
+        <service
+            android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="backend:com.google.android.datatransport.cct.CctBackendFactory"
+                tools:node="remove" />
+        </service>
+
         <!-- ACL connect/disconnect are exempt from the implicit-broadcast ban -->
         <receiver
             android:name=".BtReceiver"
@@ -31,6 +75,25 @@
             <intent-filter>
                 <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
                 <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- keeps the EQ effects alive while the app isn't on screen -->
+        <service
+            android:name=".EqService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user's audio equalizer attached to the phone's audio output" />
+        </service>
+
+        <!-- Smart adaptive: activity changes, hold timer, boot, call state; boot/update also restart the EQ -->
+        <receiver android:name=".SmartReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.PHONE_STATE" />
             </intent-filter>
         </receiver>
 

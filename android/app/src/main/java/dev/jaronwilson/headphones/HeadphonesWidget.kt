@@ -35,6 +35,12 @@ class HeadphonesWidget : AppWidgetProvider() {
         super.onReceive(context, intent)
         if (intent.action != ACTION) return
         val cmd = intent.getStringExtra(EXTRA_CMD) ?: return
+        if (cmd == "eq:cycle") {        // the EQ lives on the phone: no network, no Bluetooth, instant
+            EqModel.cycle(context)
+            EqService.update(context)
+            render(context, last, "EQ: " + EqModel.presetLabel(context))
+            return
+        }
         // Show the choice at once (optimistic), then confirm with the panel's real state.
         render(context, optimistic(last, cmd), if (cmd == "refresh") "Refreshing…" else null)
         val pending = goAsync()
@@ -72,6 +78,12 @@ class HeadphonesWidget : AppWidgetProvider() {
         private val latest = ConcurrentHashMap<String, String>()
 
         fun post(context: Context, path: String, body: String) = http(context, "POST", path, body)
+
+        /** The laptop panel's /api/state, or null without a panel or network. */
+        fun panelState(context: Context): JSONObject? = fetch(context)
+
+        /** Redraw from the last known state (e.g. after an EQ change in the app). */
+        fun redraw(context: Context) = render(context, last, null)
 
         /** Fetch and redraw; if the laptop disagrees about who has the AirPods, correct it first. */
         fun refresh(context: Context) {
@@ -245,6 +257,21 @@ class HeadphonesWidget : AppWidgetProvider() {
             v.setOnClickPendingIntent(R.id.cr_bdown, cmdIntent(context, "cr:bass-", R.id.cr_bdown))
             v.setOnClickPendingIntent(R.id.cr_bup, cmdIntent(context, "cr:bass+", R.id.cr_bup))
             v.setOnClickPendingIntent(R.id.header, cmdIntent(context, "refresh", R.id.header))
+
+            // EQ: a live preview of the curve, and a button that steps through the presets
+            runCatching { v.setImageViewBitmap(R.id.eq_curve, EqModel.previewBitmap(context, 240, 48)) }
+            v.setTextViewText(R.id.eq_btn, runCatching { EqModel.presetLabel(context) }.getOrDefault("EQ"))
+            v.setOnClickPendingIntent(R.id.eq_btn, cmdIntent(context, "eq:cycle", R.id.eq_btn))
+            v.setOnClickPendingIntent(R.id.eq_curve, PendingIntent.getActivity(context, R.id.eq_curve,
+                Intent(context, SetupActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+
+            // Live Translation: opens the screen with "toggle" (Android only lets a visible app start the mic)
+            v.setTextViewText(R.id.tr_btn, if (LiveTranslate.running) "Stop translate" else "Translate")
+            v.setInt(R.id.tr_btn, "setBackgroundResource", if (LiveTranslate.running) R.drawable.btn_on else R.drawable.btn)
+            v.setOnClickPendingIntent(R.id.tr_btn, PendingIntent.getActivity(context, R.id.tr_btn,
+                Intent(context, TranslateActivity::class.java).setAction(TranslateActivity.ACTION_TOGGLE)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
 
             val mgr = AppWidgetManager.getInstance(context)
             mgr.updateAppWidget(ComponentName(context, HeadphonesWidget::class.java), v)

@@ -6,12 +6,23 @@ CPython's socket.AF_BLUETOOTH is Linux-only, so this talks RFCOMM channel 9
 via ctypes. Same AT protocol as laptop/panel.py.
 
 Usage:
-  python crusher_win.py state
+  python crusher_win.py state [--json]
   python crusher_win.py anc on|off
   python crusher_win.py transparency on|off
   python crusher_win.py bass <0-10>
-  python crusher_win.py crusher on|off
+  python crusher_win.py crusher on|off            # sensory bass on/off
+  python crusher_win.py transparency-level <0-100>
+  python crusher_win.py atoncall on|off           # hear-through during calls
+  python crusher_win.py atonpause on|off          # hear-through while paused
+  python crusher_win.py anc-filter <n>|off        # ANC filter id (range not known)
+  python crusher_win.py volume up|down [steps]
+  python crusher_win.py probe                     # read-only: which extra commands this firmware answers
+
+The extras come from Skull-iQ's AT code (generic Bragi AT commands); not every firmware answers all of
+them, so `state` only shows the ones that replied OK. See docs/PROTOCOL.md.
 """
+import json
+import re
 import os
 import ctypes
 import sys
@@ -99,13 +110,65 @@ class Crusher:
             pass
 
 
+EXTRA_Q = {"transparency_level": "AT.UIAUDIO=transparency", "at_on_call": "AT.UIAUDIO=atoncall",
+           "at_on_pause": "AT.UIAUDIO=atonpause", "anc_filter": "AT.UIAUDIO=anc_filter"}
+
+
+def _ok(r):
+    return "OK" in r and "ERROR" not in r
+
+
+def read_state(c):
+    """The same fields as the laptop panel's /api/state 'crusher' object."""
+    txt = c.cmd("AT.UIAUDIO?") + "\n" + c.cmd("AT.CRUSHER?")
+    lvl = re.search(r"level:\s*(\d+)\s*/\s*(\d+)", txt)
+    st = re.search(r"(?i)state:\s*(on|off)", txt)
+    out = {"online": True,
+           "anc": bool(re.search(r"anc:\s*on", txt)),
+           "transparency": bool(re.search(r"transparency:\s*on", txt)),
+           "bass": int(lvl.group(1)) if lvl else None,
+           "bass_max": int(lvl.group(2)) if lvl else 10,
+           "bass_on": st.group(1).lower() == "on" if st else None,
+           "extras": {}}
+    for k, q in EXTRA_Q.items():
+        r = c.cmd(q)
+        if not _ok(r):
+            continue
+        if k == "transparency_level":
+            m = re.search(r":\s*(?:on|off)?\s*,\s*(\d+)", r)
+            if m: out["extras"][k] = int(m.group(1))
+        elif k == "anc_filter":
+            m = re.search(r":\s*(\d+|off)", r)
+            if m: out["extras"][k] = m.group(1) if m.group(1) == "off" else int(m.group(1))
+        else:
+            m = re.search(r":\s*(on|off)", r)
+            if m: out["extras"][k] = m.group(1) == "on"
+    return out
+
+
 def main():
     a = sys.argv[1:] or ["state"]
     c = Crusher()
     try:
         if a[0] == "state":
-            print(c.cmd("AT.UIAUDIO?"))
-            print(c.cmd("AT.CRUSHER?"))
+            if "--json" in a:
+                print(json.dumps(read_state(c)))
+            else:
+                print(c.cmd("AT.UIAUDIO?"))
+                print(c.cmd("AT.CRUSHER?"))
+        elif a[0] == "probe":
+            for q in ["AT.UIAUDIO?", "AT.CRUSHER?", *EXTRA_Q.values(), "AT.FEATURE=count"]:
+                print(f"{q!r} -> {c.cmd(q)!r}")
+        elif a[0] == "transparency-level":
+            print(c.cmd(f"AT.UIAUDIO=transparency,,{max(0, min(100, int(a[1])))}"))
+        elif a[0] in ("atoncall", "atonpause"):
+            print(c.cmd(f"AT.UIAUDIO={a[0]},{'on' if a[1] == 'on' else 'off'}"))
+        elif a[0] == "anc-filter":
+            v = "off" if a[1] == "off" else str(int(a[1]))
+            print(c.cmd(f"AT.UIAUDIO=anc_filter,{v}"))
+        elif a[0] == "volume":
+            steps = int(a[2]) if len(a) > 2 else 1
+            print(c.cmd(f"AT.VOLUME={'up' if a[1] == 'up' else 'down'},{steps}"))
         elif a[0] == "anc":
             print(c.cmd(f"AT.UIAUDIO=anc,{a[1]}"))
         elif a[0] == "transparency":

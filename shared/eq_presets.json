@@ -1,0 +1,21 @@
+{
+  "_comment": "Shared EQ model for every platform: the laptop panel (PipeWire filter-chain), the Android app (audiofx) and Windows (Equalizer APO). Gains are in dB. Shelves use Q 0.707, peaks Q 1.0. Bands are listed in the order gains are stored (the 'sub' band was added last so older saved gains keep their meaning). 'subsonic' is a high-pass applied only while the sub band is boosted, to keep inaudible rumble below it from eating headroom.",
+  "gain_min": -12,
+  "gain_max": 12,
+  "bands": [
+    {"key": "bass",     "label": "Bass",     "type": "lowshelf",  "freq": 80,    "q": 0.707},
+    {"key": "lowmid",   "label": "Low-mid",  "type": "peaking",   "freq": 250,   "q": 1.0},
+    {"key": "mid",      "label": "Mid",      "type": "peaking",   "freq": 1000,  "q": 1.0},
+    {"key": "highmid",  "label": "High-mid", "type": "peaking",   "freq": 3500,  "q": 1.0},
+    {"key": "treble",   "label": "Treble",   "type": "highshelf", "freq": 10000, "q": 0.707},
+    {"key": "sub",      "label": "Sub",      "type": "peaking",   "freq": 45,    "q": 0.8}
+  ],
+  "subsonic": {"freq": 25, "q": 0.707},
+  "presets": [
+    {"key": "flat",   "label": "Flat",          "gains": [0, 0, 0, 0, 0, 0]},
+    {"key": "bass",   "label": "Bass boost",    "gains": [6, 2, 0, 0, 0, 0]},
+    {"key": "vocal",  "label": "Vocal/Podcast", "gains": [-3, -1, 2, 4, 1, 0]},
+    {"key": "treble", "label": "Treble",        "gains": [0, 0, 0, 2, 5, 0]},
+    {"key": "rumble", "label": "Rumble",        "gains": [6, 0, 0, 0, 0, 12]}
+  ]
+}

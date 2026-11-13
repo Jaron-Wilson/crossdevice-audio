@@ -83,10 +83,14 @@ object CrusherDirect {
      * Open one RFCOMM session, send [cmds] (each gets a trailing CR), and if [read] collect the
      * replies (up to an "OK"/"ERROR" per command). Returns the combined reply text.
      */
-    private fun session(context: Context, cmds: List<String>, read: Boolean): String = synchronized(lock) {
+    private fun session(context: Context, cmds: List<String>, read: Boolean): String =
+        sessionEach(context, cmds, read).joinToString("\n")
+
+    /** Like [session], but one reply string per command. */
+    private fun sessionEach(context: Context, cmds: List<String>, read: Boolean): List<String> = synchronized(lock) {
         val dev = device(context) ?: error("No paired Crusher")
         val sock = socket(dev)
-        val sb = StringBuilder()
+        val replies = mutableListOf<String>()
         try {
             sock.connect()
             val out = sock.outputStream
@@ -95,6 +99,7 @@ object CrusherDirect {
                 out.write((c + "\r").toByteArray()); out.flush()
                 Thread.sleep(350)
                 if (!read) continue
+                val sb = StringBuilder()
                 val deadline = System.currentTimeMillis() + 1500
                 val buf = ByteArray(1024)
                 while (System.currentTimeMillis() < deadline) {
@@ -104,11 +109,60 @@ object CrusherDirect {
                         if (sb.contains("OK") || sb.contains("ERROR")) break
                     } else Thread.sleep(40)
                 }
+                replies += sb.toString()
             }
         } finally {
             runCatching { sock.close() }
         }
-        return sb.toString()
+        return replies
+    }
+
+    // Extras found in Skull-iQ's AT code (generic Bragi AT commands). Probed live on this firmware:
+    // AT.UIAUDIO=transparency|atoncall|atonpause answer with on/off ONLY (there is no transparency
+    // level, and anc_filter / samplingrate / AT.VOLUME? / AT.FEATURE=enable are ERROR), so no level
+    // control exists and we never send commands we have not seen answered. Read once per connection.
+    private val EXTRA_Q = linkedMapOf("at_on_call" to "AT.UIAUDIO=atoncall", "at_on_pause" to "AT.UIAUDIO=atonpause")
+    @Volatile private var extras: JSONObject? = null
+
+    private fun answered(r: String) = r.contains("OK") && !r.contains("ERROR")
+
+    private fun readExtras(context: Context): JSONObject {
+        extras?.let { return it }
+        val replies = runCatching { sessionEach(context, EXTRA_Q.values.toList(), read = true) }.getOrNull()
+            ?: return JSONObject()
+        val out = JSONObject()
+        for ((k, r) in EXTRA_Q.keys.zip(replies)) {
+            if (!answered(r)) continue
+            Regex(":\\s*(on|off)").find(r)?.let { out.put(k, it.groupValues[1] == "on") }
+        }
+        // read-only feature flags: AT.FEATURE=count, then AT.FEATURE=info,0,<count> ("name,id,policy,x,enabled|disabled")
+        runCatching {
+            val cnt = Regex("(\\d+)").find(sessionEach(context, listOf("AT.FEATURE=count"), read = true).first())
+                ?.groupValues?.get(1)?.toInt() ?: 0
+            if (cnt > 0) {
+                val r = sessionEach(context, listOf("AT.FEATURE=info,0,${minOf(16, cnt)}"), read = true).first()
+                val arr = org.json.JSONArray()
+                for (m in Regex("\\.FEATURE:\\s*([^,|\\r\\n]+),([^,]+),[^,]*,[^,]*,(enabled|disabled)").findAll(r))
+                    arr.put(JSONObject().put("name", m.groupValues[1].trim()).put("enabled", m.groupValues[3] == "enabled"))
+                if (arr.length() > 0) out.put("features", arr)
+            }
+        }
+        extras = out
+        return out
+    }
+
+    /** Set "bass_on", "at_on_call" or "at_on_pause" (Boolean). */
+    fun setSetting(context: Context, name: String, value: Any) {
+        val cmd = when (name) {
+            // Skull-iQ's CRUSHER_SET_STATE is "AT.CRUSHER=" + on|off ("AT.CRUSHER=state,on" answers ERROR)
+            "bass_on" -> "AT.CRUSHER=" + (if (value == true) "on" else "off")
+            "at_on_call" -> "AT.UIAUDIO=atoncall," + (if (value == true) "on" else "off")
+            "at_on_pause" -> "AT.UIAUDIO=atonpause," + (if (value == true) "on" else "off")
+            else -> error("Unknown Crusher setting $name")
+        }
+        val r = sessionEach(context, listOf(cmd), read = true).firstOrNull() ?: ""
+        if (!answered(r)) error("Crusher refused $cmd")
+        if (name != "bass_on") extras?.put(name, value)
     }
 
     /** Set the noise mode: "anc", "transparency", or "off". */
@@ -122,6 +176,32 @@ object CrusherDirect {
         session(context, cmds, read = false)
     }
 
+    /** Rumble: Sensory Bass on at 10. Off puts back the level and on/off state from before. */
+    fun rumbleOn(context: Context) = rumblePrefs(context).contains("prev")
+
+    private fun rumblePrefs(context: Context) = context.getSharedPreferences("rumble", Context.MODE_PRIVATE)
+
+    fun setRumble(context: Context, on: Boolean) {
+        val p = rumblePrefs(context)
+        if (on) {
+            if (!p.contains("prev")) {
+                val s = state(context) ?: error("Crusher not connected to this phone")
+                if (!s.optBoolean("online")) error("Crusher not answering")
+                p.edit().putString("prev", JSONObject().put("bass_on", s.opt("bass_on")).put("bass", s.opt("bass")).toString()).apply()
+            }
+            val r = sessionEach(context, listOf("AT.CRUSHER=on", "AT.CRUSHER=level,10"), read = true)
+            if (r.any { !answered(it) }) error("Crusher refused Rumble")
+        } else {
+            val prev = runCatching { JSONObject(p.getString("prev", null) ?: "") }.getOrNull()
+            p.edit().remove("prev").apply()
+            if (prev == null) return                       // nothing saved: leave it as it is
+            val cmds = mutableListOf<String>()
+            if (prev.has("bass")) cmds += "AT.CRUSHER=level,${prev.optInt("bass", 5).coerceIn(0, 10)}"
+            if (prev.opt("bass_on") == false) cmds += "AT.CRUSHER=off"
+            if (cmds.isNotEmpty()) session(context, cmds, read = false)
+        }
+    }
+
     /** Set sensory-bass level, 0-10. */
     fun setBass(context: Context, level: Int) {
         session(context, listOf("AT.CRUSHER=level,${level.coerceIn(0, 10)}"), read = false)
@@ -129,17 +209,20 @@ object CrusherDirect {
 
     /** Live state read straight from the Crusher, or null if it isn't on this phone. */
     fun state(context: Context): JSONObject? {
-        if (!connected(context)) return null
+        if (!connected(context)) { extras = null; return null }
         val txt = runCatching { session(context, listOf("AT.UIAUDIO?", "AT.CRUSHER?"), read = true) }
             .getOrElse { return JSONObject().put("online", false) }
         val anc = Regex("anc:\\s*(on|off)").find(txt)?.groupValues?.get(1) == "on"
         val transparency = Regex("transparency:\\s*(on|off)").find(txt)?.groupValues?.get(1) == "on"
         val lvl = Regex("level:\\s*(\\d+)\\s*/\\s*(\\d+)").find(txt)
+        val bassOn = Regex("(?i)state:\\s*(on|off)").find(txt)?.groupValues?.get(1)?.lowercase()
         return JSONObject()
             .put("online", true)
             .put("anc", anc)
             .put("transparency", transparency)
+            .put("extras", readExtras(context))
             .apply {
+                if (bassOn != null) put("bass_on", bassOn == "on")
                 if (lvl != null) {
                     put("bass", lvl.groupValues[1].toInt())
                     put("bass_max", lvl.groupValues[2].toInt())

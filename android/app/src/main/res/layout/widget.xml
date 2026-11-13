@@ -44,4 +44,14 @@
             <TextView android:id="@+id/cr_bup" style="@style/Btn" android:text="Bass +" />
         </LinearLayout>
     </LinearLayout>
+
+    <LinearLayout android:id="@+id/eq_row" android:layout_width="match_parent"
+        android:layout_height="34dp" android:orientation="horizontal" android:layout_marginTop="6dp"
+        android:gravity="center_vertical">
+        <ImageView android:id="@+id/eq_curve" android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="match_parent" android:scaleType="fitXY" android:padding="4dp"
+            android:contentDescription="EQ curve" />
+        <TextView android:id="@+id/eq_btn" style="@style/Btn" android:text="EQ" />
+        <TextView android:id="@+id/tr_btn" style="@style/Btn" android:text="Translate" />
+    </LinearLayout>
 </LinearLayout>

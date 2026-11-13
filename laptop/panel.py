@@ -19,6 +19,9 @@ except (OSError, ValueError):
 CR_MAC = CONFIG.get("crusher_mac", ""); CR_CH = int(CONFIG.get("crusher_channel", 9))
 CR_LOCK = threading.Lock()
 def cr_at(cmds, timeout=5.0):
+    return "\n".join(cr_at_each(cmds, timeout))
+def cr_at_each(cmds, timeout=5.0):
+    """Send AT commands over one RFCOMM session; returns one reply string per command."""
     last = None
     for _ in range(4):
         try:
@@ -42,7 +45,7 @@ def cr_at(cmds, timeout=5.0):
             out.append(buf.decode(errors="replace"))
     finally:
         s.close()
-    return "\n".join(out)
+    return out
 def crusher_connected():
     """Fast: ask BlueZ whether the Crusher has a link (no RFCOMM attempt, so no multi-second timeout)."""
     import subprocess
@@ -55,16 +58,81 @@ CR_CACHE = {"t": 0.0, "v": None}
 def crusher_state(max_age=20.0):
     """Crusher state, cached: an RFCOMM query takes 1-2 s, and the widget/ring read this often."""
     if not crusher_connected():
-        CR_CACHE["v"] = None
+        CR_CACHE["v"] = None; CR_EXTRAS["v"] = None
         return {"online": False, "error": "not connected"}
     if CR_CACHE["v"] is not None and time.time() - CR_CACHE["t"] < max_age:
         return CR_CACHE["v"]
     v = crusher_state_live()
     if v.get("online"):
+        v["extras"] = crusher_extras()
         CR_CACHE.update(t=time.time(), v=v)
     return v
 def crusher_cache_set(**kw):
     if CR_CACHE["v"]: CR_CACHE["v"] = {**CR_CACHE["v"], **kw}
+def crusher_setting(name, value):
+    """Set one of the Crusher extras. Returns the AT reply."""
+    if name == "bass_on":
+        cmd = f"AT.CRUSHER={'on' if value else 'off'}"   # Skull-iQ: CRUSHER_SET_STATE = "AT.CRUSHER=" + on|off
+    elif name == "transparency_level":
+        cmd = f"AT.UIAUDIO=transparency,,{max(0, min(100, int(value)))}"
+    elif name in ("at_on_call", "at_on_pause"):
+        cmd = f"AT.UIAUDIO={'atoncall' if name == 'at_on_call' else 'atonpause'},{'on' if value else 'off'}"
+    elif name == "anc_filter":
+        v = "off" if value in ("off", None) else str(max(0, min(255, int(value))))
+        cmd = f"AT.UIAUDIO=anc_filter,{v}"
+    else:
+        raise ValueError("unknown Crusher setting")
+    with CR_LOCK: r = cr_at([cmd])
+    if not _cr_answered(r):
+        raise RuntimeError(f"Crusher refused {cmd}: {r.strip()[:80]}")
+    if name == "bass_on":
+        crusher_cache_set(bass_on=bool(value))
+    else:
+        if CR_EXTRAS["v"] is not None: CR_EXTRAS["v"][name] = value if name != "transparency_level" else int(value)
+        if CR_CACHE["v"]: CR_CACHE["v"]["extras"] = CR_EXTRAS["v"] or {}
+    return r
+# Extras found in Skull-iQ's AT code (generic Bragi AT commands, see docs/PROTOCOL.md). Not every
+# firmware implements them, so each is read once per connection and only offered if it answered.
+CR_EXTRA_Q = {"transparency_level": "AT.UIAUDIO=transparency", "at_on_call": "AT.UIAUDIO=atoncall",
+              "at_on_pause": "AT.UIAUDIO=atonpause", "anc_filter": "AT.UIAUDIO=anc_filter"}
+CR_EXTRAS = {"v": None}
+def _cr_answered(r):
+    return "OK" in r and "ERROR" not in r
+def parse_cr_extras(replies):
+    out = {}
+    for (k, _), r in zip(CR_EXTRA_Q.items(), replies):
+        if not _cr_answered(r):
+            continue
+        if k == "transparency_level":
+            m = re.search(r":\s*(?:on|off)?\s*,\s*(\d+)", r)
+            if m: out[k] = int(m.group(1))
+        elif k == "anc_filter":
+            m = re.search(r":\s*(\d+|off)", r)
+            if m: out[k] = m.group(1) if m.group(1) == "off" else int(m.group(1))
+        else:
+            m = re.search(r":\s*(on|off)", r)
+            if m: out[k] = m.group(1) == "on"
+    return out
+def parse_cr_features(r):
+    """AT.FEATURE=info,0,<n> lists the firmware's feature flags: name,id,policy,?,enabled|disabled.
+    Read-only here: Skull-iQ's enable command is never sent."""
+    out = []
+    for m in re.finditer(r"\.FEATURE:\s*([^,|\r\n]+),([^,]+),[^,]*,[^,]*,(enabled|disabled)", r):
+        out.append({"name": m.group(1).strip(), "enabled": m.group(3) == "enabled"})
+    return out
+def crusher_extras():
+    if CR_EXTRAS["v"] is None:
+        try:
+            with CR_LOCK:
+                v = parse_cr_extras(cr_at_each(list(CR_EXTRA_Q.values())))
+                cnt = re.search(r"(\d+)", cr_at_each(["AT.FEATURE=count"])[0])
+                if cnt and int(cnt.group(1)) > 0:
+                    f = parse_cr_features(cr_at_each([f"AT.FEATURE=info,0,{min(16, int(cnt.group(1)))}"])[0])
+                    if f: v["features"] = f
+            CR_EXTRAS["v"] = v
+        except Exception:
+            return {}
+    return CR_EXTRAS["v"]
 def crusher_state_live():
     try:
         with CR_LOCK: txt = cr_at(["AT.UIAUDIO?","AT.CRUSHER?"])
@@ -76,14 +144,69 @@ def crusher_state_live():
             "anc": get(r"anc:\s*(on|off)")=="on",
             "transparency": get(r"transparency:\s*(on|off)")=="on",
             "bass": int(lvl.group(1)) if lvl else None,
+            "bass_on": (get(r"(?i)state:\s*(on|off)") or "").lower() == "on" if get(r"(?i)state:\s*(on|off)") else None,
             "bass_max": int(lvl.group(2)) if lvl else 10}
 
 # ---- AirPods (AAP over L2CAP, persistent) ----
 AP_MAC = CONFIG.get("airpods_mac", ""); PSM = 0x1001
 HS=bytes.fromhex("00000400010002000000000000000000")
-NOTIFY=bytes.fromhex("040004000F00FFFFFEFF"); FEAT=bytes.fromhex("040004004D00FF00000000000000")
+# notification mask: all ones, as LibrePods sends it
+NOTIFY=bytes.fromhex("040004000F00FFFFFFFF"); FEAT=bytes.fromhex("040004004D00FF00000000000000")
+# Reported after NOTIFY on AirPods Pro 2 (checked live): 0x0D 0x1B 0x26 0x28 0x2E and others. NOT reported:
+# 0x0A ear detection, 0x1A press-and-hold modes, 0x34 allow Off -> the panel remembers what it last set.
 NC=bytes.fromhex("0400040009000d"); BAT=bytes.fromhex("040004000400")
 MODE={"off":1,"anc":2,"transparency":3,"adaptive":4}; MNAME={1:"off",2:"anc",3:"transparency",4:"adaptive"}
+# AAP control commands (04 00 04 00 09 00 <id> <4 data bytes>), ids from LibrePods' docs/source.
+# The AirPods push the current value of each after the notification request, and echo every change.
+CTL_HDR = bytes.fromhex("040004000900")
+AP_SETTINGS = {                       # name: (id, kind)
+    "adaptive_level": (0x2E, "level"),            # 0-100: 0 lets the most noise in, 100 filters the most
+    "conversational_awareness": (0x28, "bool"),
+    "personalized_volume": (0x26, "bool"),
+    "ear_detection": (0x0A, "bool"),
+    "press_hold_modes": (0x1A, "mask"),           # which modes a stem press-and-hold cycles through
+    "allow_off": (0x34, "bool"),                  # offer "Off" in that cycle
+    "one_bud_anc": (0x1B, "bool"),                # noise cancelling with one AirPod in
+}
+MASK_BITS = {"off": 1, "anc": 2, "transparency": 4, "adaptive": 8}
+def ap_encode(name, value):
+    cid, kind = AP_SETTINGS[name]
+    if kind == "bool":
+        b = 1 if value in (True, 1, "1", "on", "true") else 2
+    elif kind == "level":
+        b = max(0, min(100, int(value)))
+    else:
+        modes = value if isinstance(value, list) else str(value).split(",")
+        b = sum(MASK_BITS[m] for m in set(modes) if m in MASK_BITS)
+        if bin(b).count("1") < 2:
+            raise ValueError("press and hold needs at least two modes")
+    return CTL_HDR + bytes([cid, b, 0, 0, 0])
+RAW_LOG = "/tmp/aap-raw.log"
+def raw_log(tag, p):
+    """Append one AAP packet to the raw log (capped at ~1 MB, then truncated)."""
+    try:
+        if os.path.exists(RAW_LOG) and os.path.getsize(RAW_LOG) > 1_000_000:
+            open(RAW_LOG, "w").close()
+        with open(RAW_LOG, "a") as f: f.write(time.strftime("%T ") + tag + " " + p.hex() + "\n")
+    except OSError:
+        pass
+# Settings the AirPods never reported but we set: remembered so the panel can show them (marked as such).
+AP_REMEMBER = os.path.expanduser("~/.config/headphone-panel/airpods-settings.json")
+def ap_remembered():
+    try: return json.load(open(AP_REMEMBER))
+    except (OSError, ValueError): return {}
+def ap_remember(name, value):
+    d = ap_remembered(); d[name] = value
+    try:
+        os.makedirs(os.path.dirname(AP_REMEMBER), exist_ok=True)
+        with open(AP_REMEMBER, "w") as f: json.dump(d, f)
+    except OSError:
+        pass
+def ap_decode(kind, data):
+    v = data[0]
+    if kind == "bool": return {1: True, 2: False}.get(v)
+    if kind == "level": return v
+    return [m for m, bit in MASK_BITS.items() if v & bit]
 BT={2:"left",4:"right",8:"case"}; BS={1:"discharging",2:"charging",4:"disconnected"}
 # ---- AirPods battery from their BLE "proximity pairing" broadcast (Apple 0x004C, type 0x07).
 # Works whichever host is playing: the AAP battery reports only reach the active host.
@@ -139,8 +262,13 @@ class AirPods(threading.Thread):
     def __init__(self):
         super().__init__()
         self.sock=None; self.lock=threading.Lock()
-        self.mode=None; self.battery={}; self.online=False
-        self.wake = threading.Event()
+        self.mode=None; self.battery={}; self.online=False; self.ctl={}
+        self.ear=None        # (primary, secondary): 0 in ear, 1 out of ear, 2 in case (AAP 0x06)
+        self.speaking=None   # (level, time) from Conversation Awareness (AAP 0x4B)
+        self.on_head=None    # callback(rate, dt) while head tracking runs
+        self.head_on=False; self.head_n=0; self.head_t=0.0
+        self.echo={}     # id -> time the AirPods last sent that setting (a report or the echo of a change)
+        self.wake = threading.Event(); self.fast = False
         try: self.phone = open(HANDOFF_FILE).read().strip() == "phone"
         except OSError: self.phone = False
     def set_handoff(self, phone):
@@ -154,7 +282,39 @@ class AirPods(threading.Thread):
                     except OSError: pass
             subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
         self.wake.set()
+    # Head tracking (AAP opcode 0x17), packets as LibrePods sends them (its default "alternate" pair,
+    # bluetooth/AACPManager.kt). Data: >60 bytes, prefix 04000400 1700 0000 1000, byte 10 0x44/0x45.
+    HT_START=bytes.fromhex("040004001700000010000F000873420B081010021A0501409C0000")
+    HT_STOP=bytes.fromhex("040004001700000010000F000875420B081010021A050100000000")
+    def head_tracking(self, on):
+        """Start/stop the AirPods' head-orientation stream (stop it when unused: battery)."""
+        self.head_on=bool(on); self.head_t=0.0
+        return self.send(self.HT_START if on else self.HT_STOP)
+    def _head(self,p):
+        """Head-tracking packet. Checked live (AirPods Pro 2): int16 LE at 43/45/47 is a vector of
+        constant length (~29000, gravity-like), 49/51/53 are small rates that jump when the head
+        moves (gyro). LibrePods turns 45/47 into "yaw" but that vector can't see turns about the
+        vertical, so the panel integrates the rotation rate about it instead (scale calibrated by the
+        user, see hp_spatial.Spatial.calibrate)."""
+        i16=lambda k:int.from_bytes(p[k:k+2],"little",signed=True)
+        g=[i16(43),i16(45),i16(47)]; w=[i16(49),i16(51),i16(53)]
+        n=sum(x*x for x in g)**0.5 or 1.0
+        rate=sum(a*b for a,b in zip(w,g))/n          # rotation rate about the vertical, raw units
+        now=time.time(); dt=min(0.1,now-self.head_t) if self.head_t else 0.0; self.head_t=now
+        self.head_n+=1
+        cb=self.on_head
+        if cb and dt:
+            try: cb(rate,dt)
+            except Exception: pass
     def _parse(self,p):
+        if len(p)>60 and p[:10]==bytes.fromhex("04000400170000001000") and p[10] in (0x44,0x45) and p[11]==0:
+            return self._head(p)
+        if p[:6]==bytes.fromhex("040004000600") and len(p)>=8:
+            self.ear=(p[6],p[7]); raw_log("<", p)
+        if p[:6]==bytes.fromhex("040004004b00") and len(p)>=10:
+            self.speaking=(p[9],time.time()); raw_log("<", p)
+        if p[:6]==CTL_HDR and len(p)>=8:
+            self.ctl[p[6]]=bytes(p[7:11]); self.echo[p[6]]=time.time()
         i=p.find(NC)
         if i>=0 and len(p)>i+7: self.mode=p[i+7]
         j=p.find(BAT)
@@ -175,6 +335,8 @@ class AirPods(threading.Thread):
                 s.sendall(HS); time.sleep(0.3); s.sendall(FEAT); time.sleep(0.2); s.sendall(NOTIFY)
                 with self.lock: self.sock=s
                 self.online=True; s.settimeout(2)
+                if self.head_on:                    # spatial audio was tracking: resume the stream
+                    self.head_t=0.0; time.sleep(0.3); s.sendall(self.HT_START)
                 while not self.phone:
                     try:
                         p=s.recv(1024)
@@ -186,15 +348,18 @@ class AirPods(threading.Thread):
                     # shows the phone joining, so step aside even if the phone couldn't reach us.
                     if len(p)>4 and p[4]==0x2E and PHONE_BT in p and not self.phone:
                         threading.Thread(target=self.set_handoff, args=(True,), daemon=True).start()
-                    if len(p)>6 and (p[4] in (0x0E,0x2E,0x10) or (p[4]==0x09 and p[6] in (0x06,0x20))):
-                        with open("/tmp/aap-raw.log","a") as f: f.write(time.strftime("%T ")+p.hex()+"\n")
-            except Exception:
-                pass
+                    if len(p)>6 and p[4] in (0x09,0x0E,0x2E,0x10):
+                        raw_log("<", p)
+            except Exception as e:
+                if repr(e) != getattr(self, "last_err", None):      # log each new kind of failure once
+                    self.last_err = repr(e); print("AirPods AAP:", repr(e), flush=True)
             with self.lock: self.sock=None
-            self.online=False; self.mode=None; self.battery={}
+            self.online=False; self.mode=None; self.battery={}; self.ctl={}; self.echo={}; self.ear=None; self.speaking=None
             if self.phone:
                 subprocess.run(["bluetoothctl", "disconnect", AP_MAC], capture_output=True, timeout=10)
             # long backoff (a short one fights another host); a hand-off back wakes us at once
+            if self.fast:
+                self.fast = False; time.sleep(1); continue
             self.wake.wait(60); self.wake.clear()
     def set_mode(self,name):
         with self.lock:
@@ -203,79 +368,278 @@ class AirPods(threading.Thread):
                 self.sock.sendall(bytes.fromhex("0400040009000D")+bytes([MODE[name],0,0,0])); return True
             except Exception:
                 return False
+    def set_mode_wait(self, name, wait=1.5):
+        """Set the noise mode and wait for the AirPods to echo it (they do for 0x0D)."""
+        t0=time.time()
+        if not self.set_mode(name): return False, False
+        while time.time()-t0<wait:
+            if self.echo.get(0x0D,0)>=t0 and self.mode==MODE[name]: return True, True
+            time.sleep(0.05)
+        return True, False
+    def block(self, level, mode="adaptive"):
+        """Block noise with the AirPods themselves: Adaptive mode + its noise level (0x2E, 0 = hear the
+        most, 100 = block the most), or full ANC. The AirPods echo the mode at once; the level is applied
+        silently and only reported again when the AAP link reopens, so read it back to confirm."""
+        res={"mode":mode}
+        ok,res["mode_confirmed"]=self.set_mode_wait(mode)
+        if not ok: return None
+        if mode=="adaptive" and level is not None:
+            lvl=max(0,min(100,int(level)))
+            sent,_=self.set_setting("adaptive_level",lvl)
+            if not sent: return None
+            res["level"]=lvl
+            t0=time.time(); time.sleep(0.3); self.refresh()
+            while time.time()-t0<8:
+                if self.online and self.echo.get(0x2E,0)>t0: break
+                time.sleep(0.1)
+            got=self.ctl.get(0x2E) if self.echo.get(0x2E,0)>t0 else None
+            res["level_reported"]=got[0] if got else None
+            res["level_confirmed"]=bool(got) and got[0]==lvl
+            res["mode_now"]=MNAME.get(self.mode,self.mode)
+        return res
+    def send(self, pkt):
+        with self.lock:
+            if not self.sock: return False
+            try: self.sock.sendall(pkt)
+            except Exception: return False
+        raw_log(">", pkt)
+        return True
+    def set_setting(self, name, value, wait=0.6):
+        """Send a setting; returns (sent, echoed). AirPods Pro 2 apply a setting without echoing it
+        back to the host that sent it; reconnecting (refresh) makes them report it again."""
+        pkt = ap_encode(name, value)
+        t0 = time.time()
+        if not self.send(pkt): return False, False
+        while time.time() - t0 < wait:
+            if self.echo.get(pkt[6], 0) >= t0: break
+            time.sleep(0.05)
+        echoed = self.echo.get(pkt[6], 0) >= t0
+        if not echoed:
+            self.ctl[pkt[6]] = pkt[7:11]      # optimistic: some settings are accepted silently
+        ap_remember(name, ap_decode(AP_SETTINGS[name][1], pkt[7:11]))
+        return True, echoed
+    def refresh(self):
+        """Read the settings back: they only report them right after the AAP connection opens, so drop the
+        AAP link (not the Bluetooth/audio link) and reconnect at once."""
+        with self.lock:
+            if not self.sock: return False
+            self.fast = True
+            try: self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
+        return True
+    def settings(self):
+        """Last value the AirPods reported for each setting, else the last value we set (remembered);
+        None = unknown."""
+        mem = ap_remembered()
+        return {n: (ap_decode(k, self.ctl[i]) if i in self.ctl else mem.get(n))
+                for n, (i, k) in AP_SETTINGS.items()}
+    def reported(self):
+        """Which settings the AirPods themselves have reported on this connection."""
+        return [n for n, (i, _) in AP_SETTINGS.items() if i in self.echo]
     def state(self):
         bat = self.battery
         if not bat and time.time() - BLE["t"] < 300:
             bat = BLE["battery"]
+        EAR={0:"in ear",1:"out of ear",2:"in case"}
+        ear=[EAR.get(x,str(x)) for x in self.ear] if self.ear else None
+        sp=None
+        if self.speaking and time.time()-self.speaking[1]<600:
+            lv=self.speaking[0]
+            sp={"speaking": lv in (1,2) or (3<lv<8), "level": lv, "ago": round(time.time()-self.speaking[1])}
         return {"online": self.online, "mode": MNAME.get(self.mode, self.mode), "battery": bat,
-                "on_phone": self.phone}
+                "ear": ear, "speaking": sp,
+                "on_phone": self.phone, "settings": self.settings(), "reported": self.reported()}
 
 AP = AirPods(); AP.start()
 
-HTML = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Headphones</title><style>
-body{font:17px/1.5 system-ui,sans-serif;background:#0f1419;color:#e8edf2;margin:0;padding:22px;max-width:480px}
-h1{font-size:20px;margin:0 0 4px}.dev{font-size:17px;font-weight:700;margin:0 0 10px}
-.card{background:#1a2230;border:1px solid #2b3647;border-radius:14px;padding:16px 18px;margin:14px 0}
-.k{color:#8aa6b4;font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
-.seg{display:flex;gap:8px}.seg button{flex:1}
-button{font:600 15px system-ui;border:0;border-radius:10px;padding:11px 10px;color:#fff;background:#273345;cursor:pointer}
-button.on{background:#2f7d4f}button:active{transform:scale(.97)}
-input[type=range]{width:100%;accent-color:#3fa7ff;height:28px}
-.row{display:flex;justify-content:space-between;align-items:center;gap:12px}
-.lvl{font-size:26px;font-weight:700;color:#5fd0ff;min-width:50px;text-align:right}
-.batt{color:#9fb;font-size:14px}.off{display:none}#none{color:#8aa6b4}
-</style>
-<h1>🎧 Headphones</h1>
-<div id=none class=off>No controllable headphones connected.</div>
-<div id=cr>
- <div class=dev>Crusher ANC 2</div>
- <div class=card><div class=k>Listening mode</div><div class=seg>
-  <button id=cr_anc onclick="cr('anc')">ANC</button>
-  <button id=cr_tr onclick="cr('transparency')">Transparency</button>
-  <button id=cr_off onclick="cr('off')">Off</button></div></div>
- <div class=card><div class=k>Crusher bass</div>
-  <div class=row><input id=cr_bass type=range min=0 max=10 step=1 onchange="crbass(this.value)"><span class=lvl id=cr_lvl>–</span></div></div>
-</div>
-<div id=ap>
- <div class=dev>AirPods Pro <span id=ap_batt class=batt></span></div>
- <div class=card><div class=k>Noise control</div><div class=seg>
-  <button id=ap_off onclick="ap('off')">Off</button>
-  <button id=ap_anc onclick="ap('anc')">ANC</button>
-  <button id=ap_tr onclick="ap('transparency')">Transp.</button>
-  <button id=ap_ad onclick="ap('adaptive')">Adaptive</button></div></div>
-</div>
-<script>
-async function load(){let s=await (await fetch('/api/state')).json();
- let c=s.crusher||{};
- cr_anc.className=c.anc?'on':'';cr_tr.className=c.transparency?'on':'';cr_off.className=(c.online&&!c.anc&&!c.transparency)?'on':'';
- document.getElementById('cr').className=c.online?'':'off';
- if(c.bass!=null){cr_bass.value=c.bass;cr_lvl.textContent=c.bass+'/'+(c.bass_max||10);}
- let a=s.airpods||{};
- for(const [k,id] of [['off','ap_off'],['anc','ap_anc'],['transparency','ap_tr'],['adaptive','ap_ad']])
-   document.getElementById(id).className=(a.mode===k)?'on':'';
- document.getElementById('ap').className=a.online?'':'off';
- let bt=a.battery||{},parts=[];for(const k of ['left','right','case'])if(bt[k])parts.push(k[0].toUpperCase()+' '+bt[k].level+'%');
- ap_batt.textContent=parts.join('  ');
- document.getElementById('none').className=(c.online||a.online)?'off':'';}
-async function cr(m){await fetch('/api/crusher/mode',{method:'POST',body:m});setTimeout(load,400)}
-async function crbass(v){cr_lvl.textContent=v+'/10';await fetch('/api/crusher/bass',{method:'POST',body:v})}
-async function ap(m){await fetch('/api/airpods/mode',{method:'POST',body:m});setTimeout(load,500)}
-load();setInterval(load,4000);
-</script>"""
+# ---- Source-side EQ (PipeWire filter-chain), see hp_eq.py ----
+try:
+    import hp_eq
+    EQ = hp_eq.Eq(CONFIG)
+except Exception as e:      # missing eq_presets.json etc.: the rest of the panel still works
+    EQ = None; EQ_ERR = str(e)
+def eq_loop():
+    time.sleep(1)
+    while True:
+        audio_tick()
+        time.sleep(5)
+threading.Thread(target=eq_loop, daemon=True).start()
+def eq_state():
+    return EQ.state() if EQ else {"available": False, "error": EQ_ERR}
+
+# ---- Rumble: one switch per device. EQ (any headphones): the "rumble" preset (sub-bass band +
+# subsonic high-pass). Crusher: Sensory Bass on at 10 (real haptic bass). Off puts back what was there.
+RUMBLE_FILE = os.path.expanduser("~/.config/headphone-panel/rumble.json")
+RUMBLE_LOCK = threading.Lock()
+def _rumble_saved():
+    try: return json.load(open(RUMBLE_FILE))
+    except (OSError, ValueError): return {}
+def _rumble_save(d):
+    os.makedirs(os.path.dirname(RUMBLE_FILE), exist_ok=True)
+    with open(RUMBLE_FILE, "w") as f: json.dump(d, f)
+def rumble_state():
+    d = _rumble_saved()
+    eq_on = bool(EQ and EQ.s.get("enabled") and EQ.s.get("preset") == "rumble")
+    return {"eq": eq_on, "crusher": bool(d.get("crusher"))}
+def rumble(device, on):
+    with RUMBLE_LOCK:
+        d = _rumble_saved()
+        if device == "eq":
+            if not EQ: raise RuntimeError("EQ unavailable")
+            if on:
+                if EQ.s.get("preset") != "rumble" or not EQ.s.get("enabled"):
+                    d["eq"] = {"enabled": EQ.s["enabled"], "preset": EQ.s["preset"], "gains": EQ.s["gains"]}
+                EQ.set(enabled=True, preset="rumble")
+            else:
+                prev = d.pop("eq", None)
+                if not prev:                       # nothing saved: just leave the Rumble preset
+                    prev = {"enabled": EQ.s["enabled"], "preset": "flat", "gains": None}
+                if prev.get("preset") in hp_eq.PRESETS and prev["preset"] != "rumble":
+                    EQ.set(enabled=prev["enabled"], preset=prev["preset"])
+                elif prev.get("gains"):
+                    EQ.set(enabled=prev["enabled"], gains=prev["gains"])
+                else:
+                    EQ.set(enabled=False, preset="flat")
+        elif device == "crusher":
+            if not crusher_connected(): raise RuntimeError("Crusher not connected")
+            if on:
+                cur = crusher_state_live()
+                if not cur.get("online"): raise RuntimeError(cur.get("error") or "Crusher not answering")
+                if not d.get("crusher"):
+                    d["crusher"] = {"bass_on": cur.get("bass_on"), "bass": cur.get("bass")}
+                with CR_LOCK: r = cr_at(["AT.CRUSHER=on", "AT.CRUSHER=level,10"])
+                crusher_cache_set(bass_on=True, bass=10)
+            else:
+                prev = d.pop("crusher", None)
+                if not prev:                       # nothing saved: leave the Crusher as it is
+                    _rumble_save(d)
+                    return rumble_state()
+                cmds = []
+                if prev.get("bass") is not None:
+                    cmds.append(f"AT.CRUSHER=level,{max(0, min(10, int(prev['bass'])))}")
+                if prev.get("bass_on") is False: cmds.append("AT.CRUSHER=off")
+                r = ""
+                if cmds:
+                    with CR_LOCK: r = cr_at(cmds)
+                    crusher_cache_set(**({"bass": int(prev["bass"])} if prev.get("bass") is not None else {}),
+                                      bass_on=prev.get("bass_on") is not False)
+            if "ERROR" in r: raise RuntimeError("Crusher refused: " + r.strip()[:80])
+        else:
+            raise ValueError("device must be eq or crusher")
+        _rumble_save(d)
+    return rumble_state()
+
+# ---- Sound viewer + notch filters, see hp_sound.py ----
+try:
+    import hp_sound
+    SOUND = hp_sound.Analyzer()
+    NOTCH = {k: hp_sound.Notch(k) for k in ("mic", "output")}
+except Exception as e:
+    SOUND = None; NOTCH = {}; SOUND_ERR = str(e)
+def _output_target():
+    dev = hp_eq.real_sink(hp_eq.default_sink()) if EQ else ""
+    return dev, (hp_eq.smart_target(dev) if dev else None)
+if NOTCH and EQ:
+    NOTCH["output"].output_target = _output_target
+# ---- Spatial audio (HRTF virtual speakers, optional head tracking), see hp_spatial.py ----
+SPATIAL_FILE = os.path.expanduser("~/.config/headphone-panel/spatial.json")
+try:
+    import hp_spatial
+    SPATIAL = hp_spatial.Spatial(AP)
+    SPATIAL.output_target = _output_target
+    AP.on_head = SPATIAL.head
+except Exception as e:
+    SPATIAL = None; SPATIAL_ERR = str(e)
+def spatial_save():
+    try:
+        with open(SPATIAL_FILE, "w") as f:
+            json.dump({"mode": SPATIAL.mode, "deg_per_unit": SPATIAL.deg_per_unit}, f)
+    except OSError: pass
+def spatial_set(mode):
+    st = SPATIAL.set_mode(mode)
+    spatial_save()
+    return st
+def spatial_restore():
+    time.sleep(4)
+    try: saved = json.load(open(SPATIAL_FILE))
+    except (OSError, ValueError): saved = {}
+    mode = saved.get("mode", "off")
+    if SPATIAL and saved.get("deg_per_unit"): SPATIAL.deg_per_unit = float(saved["deg_per_unit"])
+    if SPATIAL and mode != "off":
+        try: SPATIAL.set_mode(mode)
+        except Exception as e: SPATIAL.error = str(e)
+threading.Thread(target=spatial_restore, daemon=True).start()
+def spatial_state():
+    if not SPATIAL: return {"available": False, "error": SPATIAL_ERR}
+    return {"available": True, **SPATIAL.state()}
+def audio_tick():
+    """Every few seconds: EQ attached, default output on a real device, and the default input never the
+    AirPods mic (an app opening it would switch them to call mode)."""
+    if NOTCH:
+        try: hp_sound.keep_default_source_off_headphones()
+        except Exception: pass
+    if EQ:
+        try: EQ.tick()
+        except Exception: pass
+    if "output" in NOTCH:
+        try: NOTCH["output"].check_target()
+        except Exception: pass
+    if SPATIAL:
+        try: SPATIAL.check_target()
+        except Exception: pass
+def notch_restore():
+    time.sleep(3)
+    for n in NOTCH.values():
+        try: n.restore_saved()
+        except Exception as e: n.error = str(e)
+threading.Thread(target=notch_restore, daemon=True).start()
+def sound_state():
+    if not SOUND: return {"available": False, "error": SOUND_ERR}
+    return {"available": SOUND.available(), "error": "" if SOUND.available() else "numpy is not installed",
+            "sources": hp_sound.sources(), "listening": SOUND.source, "bins": SOUND.bin_centers(),
+            "notch": {k: n.state() for k, n in NOTCH.items()}}
+
+HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html"), encoding="utf-8").read()
 
 class H(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
     def _s(self,code,body,ct="application/json"):
         self.send_response(code); self.send_header("content-type",ct); self.end_headers()
         self.wfile.write(body.encode() if isinstance(body,str) else body)
+    def sse(self, src):
+        """Stream spectrum frames as server-sent events until the viewer goes away."""
+        if not SOUND or not SOUND.available(): return self._s(503,json.dumps({"error":"sound viewer unavailable"}))
+        if src not in [x["id"] for x in hp_sound.sources()]: return self._s(400,json.dumps({"error":"unknown microphone"}))
+        self.send_response(200); self.send_header("content-type","text/event-stream")
+        self.send_header("cache-control","no-cache"); self.send_header("x-accel-buffering","no"); self.end_headers()
+        try:
+            for f in SOUND.watch(src):
+                self.wfile.write(b"data: "+json.dumps(f,separators=(",",":")).encode()+b"\n\n"); self.wfile.flush()
+                if "error" in f: break
+            self.wfile.write(b"event: end\ndata: {}\n\n"); self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
     def do_GET(self):
+        from urllib.parse import urlsplit, parse_qs
+        u=urlsplit(self.path); q={k:v[0] for k,v in parse_qs(u.query).items()}
+        if u.path=="/api/sound": return self._s(200,json.dumps(sound_state()))
+        if u.path=="/api/sound/stream": return self.sse(q.get("src",""))
+        if u.path=="/api/sound/inspect":
+            if not SOUND: return self._s(503,json.dumps({"error":SOUND_ERR}))
+            try: return self._s(200,json.dumps(SOUND.inspect(float(q.get("lo",0)),float(q.get("hi",0)))))
+            except ValueError: return self._s(400,json.dumps({"error":"lo/hi must be numbers"}))
         if self.path=="/" : return self._s(200,HTML,"text/html; charset=utf-8")
         if self.path=="/api/caps":
             # which controls exist right now: the flick ring hides the rest
-            return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online}))
+            return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online,
+                                           "eq":bool(EQ and EQ.available())}))
         if self.path=="/api/state":
-            return self._s(200,json.dumps({"crusher":crusher_state(),"airpods":AP.state()}))
+            return self._s(200,json.dumps({"crusher":{**crusher_state(),"rumble":rumble_state()},"airpods":AP.state(),"eq":eq_state(),
+                                           "spatial":spatial_state(),"rumble":rumble_state()}))
+        if self.path=="/api/spatial":
+            return self._s(200,json.dumps(spatial_state()))
+        if self.path=="/api/eq":
+            return self._s(200,json.dumps(eq_state()))
         self._s(404,"{}")
     def do_POST(self):
         n=int(self.headers.get("content-length",0)); body=self.rfile.read(n).decode().strip()
@@ -295,14 +659,75 @@ class H(BaseHTTPRequestHandler):
                 if body not in ("phone","laptop"): return self._s(400,json.dumps({"error":"phone|laptop"}))
                 threading.Thread(target=AP.set_handoff, args=(body=="phone",), daemon=True).start()
                 return self._s(200,json.dumps({"ok":True,"airpods_with":body}))
+            if self.path=="/api/airpods/setting":
+                j=json.loads(body or "{}")
+                if j.get("name") not in AP_SETTINGS: return self._s(400,json.dumps({"error":"unknown setting"}))
+                ok,echoed=AP.set_setting(j["name"], j.get("value"))
+                if not ok: return self._s(503,json.dumps({"error":"AirPods not connected"}))
+                return self._s(200,json.dumps({"echoed":echoed,"settings":AP.settings(),"reported":AP.reported()}))
+            if self.path=="/api/airpods/refresh":
+                return self._s(200 if AP.refresh() else 503,json.dumps({"reported":AP.reported()}))
+            if self.path=="/api/crusher/setting":
+                j=json.loads(body or "{}")
+                crusher_setting(j.get("name"), j.get("value"))
+                return self._s(200,"{}")
+            if self.path in ("/api/eq","/api/eq/cycle"):
+                if not EQ: return self._s(503,json.dumps({"error":EQ_ERR}))
+                if self.path=="/api/eq/cycle": return self._s(200,json.dumps(EQ.cycle()))
+                j=json.loads(body or "{}")
+                return self._s(200,json.dumps(EQ.set(enabled=j.get("enabled"),preset=j.get("preset"),gains=j.get("gains"))))
+            if self.path=="/api/sound/stop":
+                if SOUND: SOUND.stop()
+                return self._s(200,"{}")
+            if self.path=="/api/sound/unmute":
+                if not SOUND or body not in [x["id"] for x in hp_sound.sources()]: return self._s(400,json.dumps({"error":"unknown microphone"}))
+                hp_sound.unmute(body); return self._s(200,"{}")
+            if self.path=="/api/sound/notch":
+                j=json.loads(body or "{}")
+                if j.get("kind") not in NOTCH: return self._s(400,json.dumps({"error":"kind must be mic or output"}))
+                return self._s(200,json.dumps(NOTCH[j["kind"]].set(j.get("freqs") or [], hum=bool(j.get("hum")))))
+            if self.path=="/api/rumble":
+                j=json.loads(body or "{}")
+                return self._s(200,json.dumps(rumble(j.get("device"), bool(j.get("on")))))
+            if self.path=="/api/spatial":
+                if not SPATIAL: return self._s(503,json.dumps({"error":SPATIAL_ERR}))
+                return self._s(200,json.dumps({"available":True,**spatial_set(json.loads(body or "{}").get("mode","off"))}))
+            if self.path=="/api/spatial/calibrate":
+                if not SPATIAL: return self._s(503,json.dumps({"error":SPATIAL_ERR}))
+                r=SPATIAL.calibrate(json.loads(body or "{}").get("step","start")); spatial_save()
+                return self._s(200,json.dumps({**spatial_state(),"calibration":r}))
+            if self.path=="/api/spatial/recenter":
+                if SPATIAL: SPATIAL.recenter()
+                return self._s(200,json.dumps(spatial_state()))
+            if self.path=="/api/airpods/block":
+                j=json.loads(body or "{}")
+                mode=j.get("mode","adaptive")
+                if mode not in ("adaptive","anc"): return self._s(400,json.dumps({"error":"mode must be adaptive or anc"}))
+                r=AP.block(j.get("level"), mode)
+                if r is None: return self._s(503,json.dumps({"error":"AirPods not connected"}))
+                return self._s(200,json.dumps(r))
             if self.path=="/api/airpods/mode":
                 if body not in MODE: return self._s(400,json.dumps({"error":"unknown mode"}))
                 ok=AP.set_mode(body)
                 return self._s(200 if ok else 503,"{}" if ok else json.dumps({"error":"AirPods not connected"}))
+        except ValueError as e:
+            return self._s(400,json.dumps({"error":str(e)}))
         except Exception as e:
             return self._s(500,json.dumps({"error":str(e)}))
         self._s(404,"{}")
 
 if __name__=="__main__":
+    import signal, sys
+    def cleanup():
+        if SOUND: SOUND.stop(wait=True)
+        for n in NOTCH.values(): n.shutdown()
+        if SPATIAL: SPATIAL.shutdown()
+        if EQ: EQ.shutdown()      # put the real headphones back as the default output
+    def bye(*_):
+        cleanup(); sys.exit(0)
+    signal.signal(signal.SIGTERM, bye)
     print(f"panel on 127.0.0.1:{PORT}")
-    ThreadingHTTPServer(("127.0.0.1",PORT),H).serve_forever()
+    try:
+        ThreadingHTTPServer(("127.0.0.1",PORT),H).serve_forever()
+    finally:
+        cleanup()

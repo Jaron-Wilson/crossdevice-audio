@@ -3,6 +3,7 @@
 Only the Audio part is shown:
   * fan geometry: the Audio wedge "pies out" into an outer band of choices, picked by angle;
   * audio_children(): the fan only offers controls a connected device can actually do;
+  * eq_cycle(): the "EQ" wedge steps through the shared EQ presets (laptop: panel API, PC: Equalizer APO);
   * win_bt_connected(): driver-free "is this headset connected?" on Windows (BluetoothApis, ~1 ms);
   * a background poller, so opening the ring never waits on Bluetooth.
 """
@@ -18,6 +19,7 @@ R_SUB_OUT = 216
 SUB_FAN_DEG = 212.0        # total arc the children spread across, centred on the parent
 SUB_GAP_DEG = 2.0
 WEDGE_ANGLE = {"right": 0.0, "down": 90.0, "left": 180.0, "up": 270.0}
+MAX_FAN = 12               # beyond this the slices get too thin to flick reliably (212 deg / 12 = ~18 deg)
 
 
 # ---- fan geometry ---------------------------------------------------------
@@ -52,11 +54,13 @@ CRUSHER_ADDR = 0xAABBCCDDEE01          # Skullcandy Crusher ANC 2: ANC, transpar
 AIRPODS_ADDR = 0xAABBCCDDEE02          # AirPods Pro 2: ANC, transparency, adaptive (no bass)
 HP_PANEL_LOCAL = "http://127.0.0.1:8970"                        # panel.py on the laptop
 HP_PANEL_LAPTOP = "https://your-laptop.your-tailnet.ts.net:8970"  # same panel, from the PC
+EQ_APO_SCRIPT = r"C:\path\to\crossdevice-audio\windows\eq_apo.py"  # PC: writes Equalizer APO config
 
 
 def audio_children(caps: dict, linux: bool) -> list[dict]:
     """The Audio fan's items. Volume and transport always; a headphone control only when a
-    connected device can actually do it (bass = Crusher only, adaptive = AirPods only)."""
+    connected device can actually do it (bass = Crusher only, adaptive = AirPods only).
+    The EQ wedge appears when a source-side EQ exists on this machine (caps["eq"]) and the fan has room."""
     cr, ap = bool(caps.get("crusher")), bool(caps.get("airpods"))
     who = "both" if cr and ap else ("Crusher" if cr else "AirPods")
     kids = [{"key": "voldown", "title": "Vol −", "sub": "quieter", "icon": "voldown"},
@@ -74,7 +78,27 @@ def audio_children(caps: dict, linux: bool) -> list[dict]:
              {"key": "next", "title": "Next", "sub": "track", "icon": "next"}]
     if linux:
         kids.append({"key": "output", "title": "Output", "sub": "switch", "icon": "sound"})
+    if caps.get("eq") and len(kids) < MAX_FAN:
+        # one wedge that cycles Flat -> Bass boost -> Vocal -> Treble; the sub-label shows the current one
+        kids.insert(len(kids) - (4 if linux else 3),
+                    {"key": "eq", "title": "EQ", "sub": caps.get("eq_preset") or "preset", "icon": "sound"})
     return kids
+
+
+def eq_cycle(linux: bool) -> str:
+    """Next EQ preset. Returns its label for the ring's toast."""
+    if linux:
+        import urllib.request
+        req = urllib.request.Request(HP_PANEL_LOCAL + "/api/eq/cycle", data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=8) as r:
+            st = json.loads(r.read().decode())
+    else:  # pragma: no cover - needs Windows + Equalizer APO
+        import subprocess
+        import sys
+        out = subprocess.run([sys.executable, EQ_APO_SCRIPT, "cycle"], capture_output=True, text=True, timeout=10)
+        st = json.loads(out.stdout.strip().splitlines()[-1])
+    labels = {"flat": "Flat", "bass": "Bass boost", "vocal": "Vocal", "treble": "Treble"}
+    return labels.get(st.get("preset"), "Custom")
 
 
 def win_bt_connected(addr: int) -> bool:  # pragma: no cover - needs Windows
@@ -114,6 +138,12 @@ def win_bt_connected(addr: int) -> bool:  # pragma: no cover - needs Windows
         k32.CloseHandle(h)
 
 
+def _win_has_apo() -> bool:  # pragma: no cover - needs Windows
+    """Equalizer APO installed? (Its config folder exists.) No APO, no EQ wedge."""
+    import os
+    return os.path.isdir(os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "EqualizerAPO", "config"))
+
+
 def _panel_caps(base: str, timeout: float) -> dict:
     import urllib.request
     with urllib.request.urlopen(base + "/api/caps", timeout=timeout) as r:
@@ -133,8 +163,8 @@ class HeadphoneCaps:
     def _hp_caps_now(self) -> dict:
         if self.linux:
             c = _panel_caps(HP_PANEL_LOCAL, 3)
-            return {"crusher": bool(c.get("crusher")), "airpods": bool(c.get("airpods"))}
-        caps = {"crusher": win_bt_connected(CRUSHER_ADDR), "airpods": False}
+            return {"crusher": bool(c.get("crusher")), "airpods": bool(c.get("airpods")), "eq": bool(c.get("eq"))}
+        caps = {"crusher": win_bt_connected(CRUSHER_ADDR), "airpods": False, "eq": _win_has_apo()}
         # AirPods modes go through the laptop, which holds their control link as a 2nd host.
         if win_bt_connected(AIRPODS_ADDR):
             caps["airpods"] = bool(_panel_caps(HP_PANEL_LAPTOP, 4).get("airpods"))
@@ -146,7 +176,7 @@ class HeadphoneCaps:
             try:
                 caps = self._hp_caps_now()
             except Exception:  # noqa: BLE001 - panel down / radio off: no headphone controls
-                caps = {"crusher": False, "airpods": False}
+                caps = {"crusher": False, "airpods": False, "eq": False}
             self._hp_caps = caps
             if caps != last:
                 self.ctx.log("flow: headphone controls: %s", caps)

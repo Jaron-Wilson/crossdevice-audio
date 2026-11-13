@@ -1,0 +1,297 @@
+<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Headphones</title><style>
+body{font:17px/1.5 system-ui,sans-serif;background:#0f1419;color:#e8edf2;margin:0;padding:22px;max-width:520px}
+h1{font-size:20px;margin:0 0 4px;display:flex;align-items:center;gap:10px}.dev{font-size:17px;font-weight:700;margin:18px 0 10px}
+.card{background:#1a2230;border:1px solid #2b3647;border-radius:14px;padding:16px 18px;margin:14px 0}
+.k{color:#8aa6b4;font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
+.seg{display:flex;gap:8px;flex-wrap:wrap}.seg button{flex:1}
+button{font:600 15px system-ui;border:0;border-radius:10px;padding:11px 10px;color:#fff;background:#273345;cursor:pointer}
+button.on{background:#2f7d4f}button:active{transform:scale(.97)}
+input[type=range]{width:100%;accent-color:#3fa7ff;height:28px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.ends{display:flex;justify-content:space-between;color:#8aa6b4;font-size:12px;margin-top:-4px}
+.lvl{font-size:26px;font-weight:700;color:#5fd0ff;min-width:50px;text-align:right}
+.tg{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-top:1px solid #243041}
+.tg:first-of-type{border-top:0}.tg small{display:block;color:#8aa6b4;font-size:12px}
+.sw{width:48px;height:28px;border-radius:14px;background:#33415a;position:relative;flex:none;cursor:pointer}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#cfd8e3;transition:left .15s}
+.sw.on{background:#2f7d4f}.sw.on::after{left:23px}.sw.na{opacity:.35}
+.batt{color:#9fb;font-size:14px}.off{display:none}#none{color:#8aa6b4}.note{color:#8aa6b4;font-size:12px;margin-top:6px}
+#eqsvg{width:100%;height:190px;touch-action:none;display:block;background:#121a25;border-radius:10px}
+#mini{width:72px;height:26px}
+#spec{width:100%;height:230px;display:block;background:#0b1017;border-radius:10px;touch-action:none;cursor:crosshair;margin-top:10px}
+select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:10px;padding:10px;flex:1;min-width:0}
+.warn{color:#ffcf6b;font-size:13px;margin-top:6px}.pk{font-size:22px;font-weight:700;color:#5fd0ff}
+.act{margin-top:10px;padding-top:8px;border-top:1px solid #243041}.act button{margin:6px 6px 0 0}
+.small{font-size:13px;padding:8px 10px}
+</style>
+<h1>🎧 Headphones <canvas id=mini width=144 height=52 title="EQ curve"></canvas><span id=minilbl class=note></span></h1>
+<div id=none class=off>No controllable headphones connected.</div>
+
+<div id=cr>
+ <div class=dev>Crusher ANC 2</div>
+ <div class=card><div class=k>Listening mode</div><div class=seg>
+  <button id=cr_anc onclick="cr('anc')">ANC</button>
+  <button id=cr_tr onclick="cr('transparency')">Transparency</button>
+  <button id=cr_off onclick="cr('off')">Off</button></div></div>
+ <div class=card><div class=k>Sensory bass (haptic)</div>
+  <div class=row><input id=cr_bass type=range min=0 max=10 step=1 onchange="crbass(this.value)"><span class=lvl id=cr_lvl>–</span></div>
+  <div class=tg id=cr_bass_on_row><div>Sensory bass on</div><div class=sw id=cr_bass_on onclick="crset('bass_on',!this.classList.contains('on'))"></div></div>
+  <div class=tg><div>Rumble<small>Sensory Bass on at 10: haptic bass you feel. Off puts your level back.</small></div><div class=sw id=rb_crusher onclick="rumble('crusher',!this.classList.contains('on'))"></div></div></div>
+ <div class="card off" id=cr_extra><div class=k>Hear-through and more</div>
+  <div id=cr_tl_row><div class=row><input id=cr_tl type=range min=0 max=100 step=5 onchange="crset('transparency_level',+this.value)"><span class=lvl id=cr_tl_v>–</span></div>
+   <div class=ends><span>quieter outside</span><span>louder outside</span></div></div>
+  <div class=tg id=cr_call_row><div>Hear-through on calls</div><div class=sw id=cr_call onclick="crset('at_on_call',!this.classList.contains('on'))"></div></div>
+  <div class=tg id=cr_pause_row><div>Hear-through when paused</div><div class=sw id=cr_pause onclick="crset('at_on_pause',!this.classList.contains('on'))"></div></div>
+  <div class=note id=cr_feat></div>
+ </div>
+</div>
+
+<div id=ap>
+ <div class=dev>AirPods Pro <span id=ap_batt class=batt></span></div>
+ <div class=card><div class=k>Noise control</div><div class=seg>
+  <button id=ap_off onclick="ap('off')">Off</button>
+  <button id=ap_anc onclick="ap('anc')">ANC</button>
+  <button id=ap_tr onclick="ap('transparency')">Transp.</button>
+  <button id=ap_ad onclick="ap('adaptive')">Adaptive</button></div>
+  <div class=note id=ap_ear></div></div>
+ <div class=card><div class=k>Block noise</div>
+  <div class=note style="margin-top:0">Your AirPods listen with their own mics and adjust automatically (Adaptive). Set how much they block:</div>
+  <input id=ap_lvl type=range min=0 max=100 step=1 oninput="lvlDrag(this.value)" onchange="block(100-this.value)">
+  <div class=ends><span>Block more</span><span id=ap_lvl_v></span><span>Hear more</span></div>
+  <div class=seg style="margin-top:8px">
+   <button class=small onclick="block(100)">Block max</button><button class=small onclick="block(50)">Balanced</button>
+   <button class=small onclick="block(0)">Hear more</button><button class=small onclick="block(null,'anc')">Full ANC</button></div>
+  <div class=note id=blk_st></div>
+  <div class=note>Adaptive and ANC lower outside sound as a whole: steady low sounds (engines, hum, fans) the most, voices and high sounds less. They can't be aimed at one sound or frequency. Full ANC blocks the most; Adaptive also lets sudden loud sounds through less and keeps some awareness.</div></div>
+ <div class=card><div class=k>Features</div>
+  <div class=tg><div>Conversational Awareness<small>lowers media when you speak</small></div><div class=sw id=s_conversational_awareness></div></div>
+  <div class=tg><div>Personalized Volume</div><div class=sw id=s_personalized_volume></div></div>
+  <div class=tg><div>Automatic ear detection</div><div class=sw id=s_ear_detection></div></div>
+  <div class=tg><div>Noise cancelling with one AirPod</div><div class=sw id=s_one_bud_anc></div></div>
+  <div class=tg><div>Offer "Off" in press and hold<small>the AirPods don't report this one</small></div><div class=sw id=s_allow_off></div></div>
+  <div class=note id=ap_rep></div>
+  <button class=small onclick="apRefresh(this)" style="margin-top:8px">Read back from AirPods</button>
+ </div>
+ <div class=card><div class=k>Press and hold cycles through</div><div class=seg id=ph>
+  <button data-m=off>Off</button><button data-m=anc>ANC</button><button data-m=transparency>Transp.</button><button data-m=adaptive>Adaptive</button></div>
+  <div class=note id=ph_src></div></div>
+</div>
+
+<div id=eqcard>
+ <div class=dev>Sound (EQ on this laptop's output)</div>
+ <div class=card>
+  <div class=tg><div>Equalizer<small id=eq_where></small></div><div class=sw id=eq_on onclick="eqset({enabled:!this.classList.contains('on')})"></div></div>
+  <div class=tg><div>Rumble<small>sub-bass boost around 45 Hz for any headphones (AirPods too). Off puts your EQ back.</small></div><div class=sw id=rb_eq onclick="rumble('eq',!this.classList.contains('on'))"></div></div>
+  <div class=seg id=eq_presets style="margin:10px 0"></div>
+  <svg id=eqsvg viewBox="0 0 500 190"></svg>
+  <div class=note id=eq_note>Drag the dots up or down. AirPods have no EQ of their own, so it's applied to the audio before it's sent.</div>
+ </div>
+</div>
+<div id=spcard class=off>
+ <div class=dev>Spatial audio (optional, this laptop)</div>
+ <div class=card>
+  <div class=seg id=sp_modes><button data-m=off>Off</button><button data-m=fixed>Fixed</button><button data-m=tracked>Head tracked</button></div>
+  <div class=row style="margin-top:10px;align-items:center"><canvas id=sphead width=160 height=160 style="width:110px;height:110px;flex:none"></canvas>
+   <div><div class=note id=sp_st style="margin-top:0"></div><span id=sp_tr><button class=small onclick="spRecenter()" style="margin-top:6px">Recenter</button> <button class=small id=sp_cal onclick="spCal()" style="margin-top:6px">Calibrate</button></span></div></div>
+  <div class=note>Plays stereo as two virtual speakers in front of you (HRTF on this laptop, before the audio is sent). Head tracked (experimental): turning your head keeps the speakers in place, using the AirPods' motion sensors; the front slowly follows where you look. Calibrate once: press it, turn your head 90° to the right, press Done. Off by default; head tracking stops when you switch it off.</div>
+ </div>
+</div>
+<details id=sndcard class=off style="margin-top:22px"><summary class=dev style="cursor:pointer">Laptop mic tools (optional)</summary>
+ <div class=card>
+  <div class=note style="margin-top:0">Uses the <b>laptop's</b> microphone, not the AirPods, and changes nothing on the AirPods. For finding a hum or whine and notching it out of calls/recordings made on this laptop, or out of what this laptop plays.</div>
+  <div class=row><select id=snd_src onchange="muteNote()"></select><button id=snd_go onclick="sndToggle()">Listen</button></div>
+  <div class=warn id=snd_mute></div>
+  <div class=warn id=snd_warn></div>
+  <canvas id=spec width=640 height=300></canvas>
+  <div class=note id=snd_note>Shows what the laptop mic hears: low sounds on the left, high on the right, newest at the top. Tap a sound, or drag across a range, to pick it.</div>
+  <div id=pick class=off>
+   <div class=act><div class=k>Picked</div><div><span class=pk id=pk_hz></span> <span id=pk_lbl></span></div><div class=note id=pk_det></div></div>
+   <div class=act><div class=k>Notch it out of sound going THROUGH this laptop</div>
+    <label class=note><input type=checkbox id=pk_harm> also its harmonics (2x, 3x) - for hum</label><br>
+    <button class=small onclick="notch('mic')">Notch the laptop mic</button><button class=small onclick="notch('output')">Notch what plays to the headphones</button>
+    <div class=note>Mic: apps recording from the laptop mic (calls, recordings) get the sound with this tone removed. Output: removes it from everything this laptop plays (music, video). Neither changes what you hear from the room around you; for that use Block noise above.</div></div>
+  </div>
+  <div class=note id=notch_st></div>
+ </div>
+</details>
+<script>
+const $=id=>document.getElementById(id);
+let S={}, EQ=null, drag=-1, gains=[0,0,0,0,0], pend=null, apLvlBusy=0;
+const FS=48000, FMIN=20, FMAX=20000;
+// RBJ cookbook biquads (the same filters PipeWire's bq_* and Equalizer APO use)
+function coef(t,f,q,g){const A=Math.pow(10,g/40),w=2*Math.PI*f/FS,c=Math.cos(w),a=Math.sin(w)/(2*q),r=2*Math.sqrt(A)*a;
+ if(t=='peaking')return[1+a*A,-2*c,1-a*A,1+a/A,-2*c,1-a/A];
+ if(t=='highpass')return[(1+c)/2,-(1+c),(1+c)/2,1+a,-2*c,1-a];
+ if(t=='lowshelf')return[A*((A+1)-(A-1)*c+r),2*A*((A-1)-(A+1)*c),A*((A+1)-(A-1)*c-r),(A+1)+(A-1)*c+r,-2*((A-1)+(A+1)*c),(A+1)+(A-1)*c-r];
+ return[A*((A+1)+(A-1)*c+r),-2*A*((A-1)+(A+1)*c),A*((A+1)+(A-1)*c-r),(A+1)-(A-1)*c+r,2*((A-1)-(A+1)*c),(A+1)-(A-1)*c-r];}
+function magDb(cs,f){const w=2*Math.PI*f/FS;let db=0;for(const[b0,b1,b2,a0,a1,a2]of cs){
+ const nr=b0+b1*Math.cos(w)+b2*Math.cos(2*w),ni=-(b1*Math.sin(w)+b2*Math.sin(2*w)),dr=a0+a1*Math.cos(w)+a2*Math.cos(2*w),di=-(a1*Math.sin(w)+a2*Math.sin(2*w));
+ db+=10*Math.log10((nr*nr+ni*ni)/(dr*dr+di*di));}return db;}
+function curve(bands,g,n){const cs=bands.map((b,i)=>coef(b.type,b.freq,b.q,g[i]||0));
+ const si=bands.findIndex(b=>b.key=='sub');if(si>=0&&(g[si]||0)>0&&EQ&&EQ.subsonic_hz!==undefined)cs.push(coef('highpass',25,0.707,0));const pts=[];
+ for(let i=0;i<=n;i++){const f=FMIN*Math.pow(FMAX/FMIN,i/n);pts.push([i/n,magDb(cs,f)]);}return pts;}
+const fx=f=>Math.log(f/FMIN)/Math.log(FMAX/FMIN);
+function drawEq(){if(!EQ)return;const W=500,H=190,P=14,R=EQ.gain_max,y=d=>H/2-d/R*(H/2-P),x=u=>P+u*(W-2*P);
+ let h='';for(const d of[-12,-6,0,6,12])if(Math.abs(d)<=R)h+=`<line x1=${P} x2=${W-P} y1=${y(d)} y2=${y(d)} stroke=${d?'#1f2a3a':'#33415a'} /><text x=2 y=${y(d)+4} fill=#56708a font-size=10>${d>0?'+':''}${d}</text>`;
+ for(const f of[100,1000,10000])h+=`<line y1=${P} y2=${H-P} x1=${x(fx(f))} x2=${x(fx(f))} stroke=#1f2a3a /><text x=${x(fx(f))+3} y=${H-3} fill=#56708a font-size=10>${f>=1000?f/1000+'k':f}</text>`;
+ const pts=curve(EQ.bands,gains,160),line=pts.map(([u,d])=>`${x(u).toFixed(1)},${y(Math.max(-R,Math.min(R,d))).toFixed(1)}`).join(' ');
+ const col=EQ.enabled?'#5fd0ff':'#6b7d90';
+ h+=`<polygon points="${x(0)},${y(0)} ${line} ${x(1)},${y(0)}" fill=${col} fill-opacity=.12 /><polyline points="${line}" fill=none stroke=${col} stroke-width=2.5 />`;
+ EQ.bands.forEach((b,i)=>{const cx=x(fx(b.freq)),cy=y(gains[i]);h+=`<circle cx=${cx} cy=${cy} r=11 fill=#0f1419 stroke=${col} stroke-width=2.5 data-i=${i} style="cursor:ns-resize"/><text x=${cx} y=${H-P-2} fill=#8aa6b4 font-size=10 text-anchor=middle>${b.label}</text><text x=${cx} y=${cy-15} fill=#e8edf2 font-size=11 text-anchor=middle>${gains[i]>0?'+':''}${gains[i]}</text>`;});
+ $('eqsvg').innerHTML=h;drawMini();}
+function drawMini(){const c=$('mini'),g=c.getContext('2d'),W=c.width,H=c.height;g.clearRect(0,0,W,H);if(!EQ)return;
+ g.strokeStyle=EQ.enabled?'#5fd0ff':'#56708a';g.lineWidth=3;g.beginPath();curve(EQ.bands,gains,60).forEach(([u,d],i)=>{const yy=H/2-d/EQ.gain_max*(H/2-4);i?g.lineTo(u*W,yy):g.moveTo(u*W,yy);});g.stroke();
+ const p=(EQ.presets.find(p=>p.key==EQ.preset)||{label:'Custom'}).label;$('minilbl').textContent=EQ.enabled?p:'EQ off';}
+const svg=$('eqsvg');
+function svgY(e){const r=svg.getBoundingClientRect();return (e.clientY-r.top)/r.height*190;}
+svg.addEventListener('pointerdown',e=>{const t=e.target.dataset&&e.target.dataset.i;if(t==null)return;drag=+t;svg.setPointerCapture(e.pointerId);});
+svg.addEventListener('pointermove',e=>{if(drag<0)return;const R=EQ.gain_max,v=(95-svgY(e))/(95-14)*R;
+ gains[drag]=Math.round(Math.max(EQ.gain_min,Math.min(R,v))*2)/2;drawEq();
+ clearTimeout(pend);pend=setTimeout(()=>eqset({gains}),120);});
+svg.addEventListener('pointerup',()=>{if(drag>=0){drag=-1;clearTimeout(pend);eqset({gains});}});
+async function eqset(o){const r=await fetch('/api/eq',{method:'POST',body:JSON.stringify(o)});const j=await r.json();
+ if(j.bands){EQ=j;if(drag<0)gains=j.gains.slice();renderEq();}else alert(j.error||'EQ failed');}
+function renderEq(){if(!EQ)return;$('eqcard').className=EQ.available?'':'off';
+ $('eq_on').className='sw'+(EQ.enabled?' on':'');
+ $('eq_presets').innerHTML=EQ.presets.map(p=>`<button class="${EQ.preset==p.key?'on':''}" onclick="eqset({preset:'${p.key}',enabled:true})">${p.label}</button>`).join('')+
+  `<button class="${EQ.preset=='custom'?'on':''}" disabled>Custom</button>`;
+ $('eq_where').textContent=EQ.enabled?(EQ.running?'in front of '+(EQ.into||'the default output')+(EQ.headroom_db?` · headroom ${EQ.headroom_db} dB`:'')+(EQ.subsonic_hz?` · cut below ${EQ.subsonic_hz} Hz`:'')+(EQ.limiter?' · limiter at -1 dBFS':''):'waiting for the headphones'):'off';
+ $('eq_note').textContent=EQ.error?('EQ: '+EQ.error):"Drag the dots up or down. AirPods have no EQ of their own, so it's applied to the audio before it's sent.";
+ drawEq();}
+function sw(id,v){const e=$(id);e.className='sw'+(v===true?' on':'')+(v==null?' na':'');}
+function lvlDrag(v){apLvlBusy=Date.now();$('ap_lvl_v').textContent=Math.abs(v-50)<=8?'balanced':'';}
+async function block(level,mode){mode=mode||'adaptive';apLvlBusy=Date.now();
+ $('blk_st').textContent=mode=='anc'?'Switching to Noise Cancellation...':'Setting Adaptive, level '+level+' (checking with the AirPods, a few seconds)...';
+ const r=await fetch('/api/airpods/block',{method:'POST',body:JSON.stringify({mode,level})});const j=await r.json();
+ if(!r.ok){$('blk_st').textContent=j.error||'failed';return;}
+ if(mode=='anc')$('blk_st').textContent=j.mode_confirmed?'Noise Cancellation on (confirmed by the AirPods).':'Sent; the AirPods did not confirm (in the case?).';
+ else $('blk_st').textContent=`Adaptive ${j.mode_confirmed?'on':'sent (not confirmed)'}, block level ${j.level}/100 `+(j.level_confirmed?'(read back from the AirPods).':j.level_reported!=null?`(AirPods report ${j.level_reported}).`:'(not read back yet).');
+ apLvlBusy=0;load();}
+async function load(){let s=await (await fetch('/api/state')).json();S=s;
+ let c=s.crusher||{};
+ cr_anc.className=c.anc?'on':'';cr_tr.className=c.transparency?'on':'';cr_off.className=(c.online&&!c.anc&&!c.transparency)?'on':'';
+ $('cr').className=c.online?'':'off';
+ if(c.bass!=null){cr_bass.value=c.bass;cr_lvl.textContent=c.bass+'/'+(c.bass_max||10);}
+ $('cr_bass_on_row').className=c.bass_on==null?'tg off':'tg';sw('cr_bass_on',c.bass_on);
+ const x=c.extras||{};$('cr_extra').className=Object.keys(x).length?'card':'card off';
+ $('cr_tl_row').className='transparency_level' in x?'':'off';if(x.transparency_level!=null){cr_tl.value=x.transparency_level;cr_tl_v.textContent=x.transparency_level;}
+ $('cr_call_row').className='at_on_call' in x?'tg':'tg off';sw('cr_call',x.at_on_call);
+ $('cr_pause_row').className='at_on_pause' in x?'tg':'tg off';sw('cr_pause',x.at_on_pause);
+ $('cr_feat').textContent=x.features?'Firmware features (read-only): '+x.features.map(f=>f.name+(f.enabled?' on':' off')).join(', '):'';
+ let a=s.airpods||{},st=a.settings||{};
+ for(const [k,id] of [['off','ap_off'],['anc','ap_anc'],['transparency','ap_tr'],['adaptive','ap_ad']])$(id).className=(a.mode===k)?'on':'';
+ $('ap').className=a.online?'':'off';
+ if(st.adaptive_level!=null&&Date.now()-apLvlBusy>3000){ap_lvl.value=100-st.adaptive_level;$('ap_lvl_v').textContent=Math.abs(st.adaptive_level-50)<=8?'balanced':'';apLvlBusy=0;}
+ const ex=[];if(a.ear)ex.push('Buds: '+a.ear.join(', '));if(a.speaking&&a.speaking.speaking&&a.speaking.ago<20)ex.push('You are speaking (Conversation Awareness)');
+ $('ap_ear').textContent=ex.join(' · ');
+ const rep=a.reported||[];
+ for(const k of['conversational_awareness','personalized_volume','ear_detection','one_bud_anc','allow_off']){sw('s_'+k,st[k]);
+  $('s_'+k).title=st[k]==null?'unknown':(rep.includes(k)?'reported by the AirPods':'last set from this panel');}
+ $('ap_rep').textContent='Ear detection, press-and-hold and "Off" aren\'t reported by the AirPods; for those the panel shows what it last set'+(rep.length?'.':' (dim = never set).');
+ renderPh();
+ let bt=a.battery||{},parts=[];for(const k of ['left','right','case'])if(bt[k])parts.push(k[0].toUpperCase()+' '+bt[k].level+'%');
+ ap_batt.textContent=parts.join('  ');
+ const rb=s.rumble||{};sw('rb_eq',!!rb.eq);sw('rb_crusher',!!rb.crusher);
+ if(s.spatial&&SP.mode!='tracked'){SP=s.spatial;renderSp();}
+ if(s.eq&&drag<0){EQ=s.eq;if(EQ.gains)gains=EQ.gains.slice();renderEq();}
+ $('none').className=(c.online||a.online)?'off':'';}
+for(const k of['conversational_awareness','personalized_volume','ear_detection','one_bud_anc','allow_off'])
+ $('s_'+k).onclick=function(){apset(k,!this.classList.contains('on'));};
+// Press and hold: the AirPods never report this (0x1A), so until it's set from here it's unknown.
+// Picks are collected locally and sent once at least two are chosen.
+let phDraft=null;
+function phCur(){return phDraft||((S.airpods||{}).settings||{}).press_hold_modes||[];}
+function renderPh(){const cur=phCur(),st=(S.airpods||{}).settings||{};
+ document.querySelectorAll('#ph button').forEach(b=>b.className=cur.includes(b.dataset.m)?'on':'');
+ $('ph_src').textContent=phDraft?'Pick at least one more (needs two or more), then it is sent.':
+  st.press_hold_modes?'Set from this panel. The AirPods apply it but never report it back, so this shows the last setting sent.':
+  'Unknown: the AirPods don\'t report it. Tap the modes you want (at least two).';}
+document.querySelectorAll('#ph button').forEach(b=>b.onclick=async()=>{const cur=phCur(),m=b.dataset.m,
+ next=cur.includes(m)?cur.filter(x=>x!=m):cur.concat([m]);
+ if(next.length<2){phDraft=next;renderPh();return;}
+ phDraft=null;
+ if(next.includes('off')&&!cur.includes('off'))await post('/api/airpods/setting',JSON.stringify({name:'allow_off',value:true}));
+ await apset('press_hold_modes',next);});
+async function apRefresh(b){b.disabled=true;b.textContent='Reading...';await post('/api/airpods/refresh','');
+ setTimeout(()=>{load();b.disabled=false;b.textContent='Read back from AirPods';},4000);}
+async function post(u,b){const r=await fetch(u,{method:'POST',body:b});if(!r.ok){let j={};try{j=await r.json()}catch(e){}alert(j.error||('HTTP '+r.status));}return r;}
+async function apset(name,value){const r=await post('/api/airpods/setting',JSON.stringify({name,value}));
+ if(r.ok){const j=await r.json();S.airpods=Object.assign(S.airpods||{},{settings:j.settings,reported:j.reported});renderPh();}setTimeout(load,500)}
+async function crset(name,value){await post('/api/crusher/setting',JSON.stringify({name,value}));setTimeout(load,400)}
+async function rumble(device,on){const r=await post('/api/rumble',JSON.stringify({device,on}));if(r.ok){S.rumble=await r.json();sw('rb_'+device,S.rumble[device]);}setTimeout(load,600);}
+async function cr(m){await post('/api/crusher/mode',m);setTimeout(load,400)}
+async function crbass(v){cr_lvl.textContent=v+'/10';await post('/api/crusher/bass',v)}
+async function ap(m){await post('/api/airpods/mode',m);setTimeout(load,500)}
+// ---- sound viewer ----
+const SF0=20,SF1=11000;let ES=null,SND={},sel=null,selX0=null;
+const spec=$('spec'),sg=spec.getContext('2d'),SW=spec.width,SPH=210,SH=spec.height;
+const xf=x=>SF0*Math.pow(SF1/SF0,x/SW),fxS=f=>Math.log(f/SF0)/Math.log(SF1/SF0)*SW;
+function col(db){const t=Math.max(0,Math.min(1,(db+100)/75));const r=Math.round(255*Math.min(1,Math.max(0,1.6*t-.5))),g=Math.round(255*Math.min(1,Math.max(0,1.8*t-.35))*.9),b=Math.round(255*Math.min(1,.35+t*.9)*(1-t*.55));return`rgb(${r},${g},${b})`;}
+function grid(){sg.fillStyle='#0b1017';sg.fillRect(0,SPH,SW,SH-SPH);sg.font='11px system-ui';
+ for(const f of[50,100,200,500,1000,2000,5000,10000]){const x=fxS(f);sg.fillStyle='#1f2a3a';sg.fillRect(x,SPH,1,SH-SPH);sg.fillStyle='#56708a';sg.fillText(f>=1000?f/1000+'k':f,x+2,SH-3);}}
+function frame(bins){const n=bins.length,w=SW/n;
+ sg.drawImage(spec,0,0,SW,SPH-2,0,2,SW,SPH-2);                                  // scroll the waterfall down
+ for(let i=0;i<n;i++){sg.fillStyle=col(bins[i]);sg.fillRect(i*w,0,w+1,2);}
+ grid();sg.strokeStyle='#5fd0ff';sg.lineWidth=1.5;sg.beginPath();
+ for(let i=0;i<n;i++){const y=SH-14-(bins[i]+100)/80*(SH-SPH-20);sg.lineTo((i+.5)*w,Math.max(SPH+2,Math.min(SH-14,y)));}sg.stroke();
+ if(sel){const a=fxS(sel[0]),b=fxS(sel[1]);sg.fillStyle='rgba(255,207,107,.22)';sg.fillRect(a,SPH,Math.max(2,b-a),SH-SPH);sg.fillStyle='#ffcf6b';sg.fillRect(a,0,1,SH);sg.fillRect(b,0,1,SH);}}
+async function sndLoad(){SND=await (await fetch('/api/sound')).json();$('sndcard').className=SND.available?'':'off';if(!SND.available)return;
+ const s=$('snd_src'),cur=s.value;s.innerHTML=(SND.sources||[]).map(x=>`<option value="${x.id}">${x.label}</option>`).join('')||'<option value="">No laptop microphone found</option>';
+ if(cur&&[...s.options].some(o=>o.value==cur))s.value=cur;else{const l=(SND.sources||[]).find(x=>x.kind=='laptop');if(l)s.value=l.id;}
+ showNotch();muteNote();}
+function muteNote(){const o=(SND.sources||[]).find(x=>x.id==$('snd_src').value);
+ $('snd_mute').innerHTML=o&&o.muted?'This microphone is muted on the laptop, so the viewer will be blank. <button class=small onclick="unmute()">Unmute it</button>':'';}
+async function unmute(){await post('/api/sound/unmute',$('snd_src').value);sndLoad();}
+function showNotch(){const n=SND.notch||{},t=[];for(const[k,v]of Object.entries(n)){
+ if(v.on){const m=v.measured||{};let ms='measuring...';
+  if(m.error)ms='self-test failed: '+m.error;else if(m.notch)ms='measured: '+m.notch.map(x=>`${x.db} dB at ${x.hz} Hz`).join(', ')+`, other tones within ${m.elsewhere_max_db} dB`;
+  const path=k=='mic'?`${(v.from||[]).length?'reading the laptop mic':'waiting for the laptop mic'}`+` → ${(v.to||[]).length?'recording apps: '+v.to.join(', '):'no app recording right now'}`
+   :`${(v.from||[]).length?'playing through it: '+v.from.join(', '):'nothing playing right now'} → ${(v.to||[]).join(', ')||'not linked yet'}`;
+  t.push(`<b>Active</b>: ${k=='mic'?'laptop mic':'laptop output'} notch at ${v.freqs.join(', ')} Hz <button class=small onclick="notchOff('${k}')">Remove</button><br>${path}<br>${ms} (silent self-test of the same filter)`);}
+ if(v.error)t.push('Notch: '+v.error);}
+ $('notch_st').innerHTML=t.join('<br><br>');}
+function sndStop(msg){if(ES){ES.close();ES=null;}$('snd_go').textContent='Listen';$('snd_go').className='';if(msg)$('snd_warn').textContent=msg;}
+function sndToggle(){if(ES){sndStop('');post('/api/sound/stop','');return;}
+ const o=$('snd_src').selectedOptions[0];if(!o)return;
+ if(!o.value)return;$('snd_warn').textContent='';
+ ES=new EventSource('/api/sound/stream?src='+encodeURIComponent(o.value));$('snd_go').textContent='Stop';$('snd_go').className='on';
+ ES.onmessage=e=>{const j=JSON.parse(e.data);if(j.bins)frame(j.bins);else if(j.error)sndStop('Stopped: '+j.error);};
+ ES.addEventListener('end',()=>sndStop(''));
+ ES.onerror=()=>sndStop('Stopped.');}
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&ES){sndStop('');post('/api/sound/stop','');}if(!document.hidden&&SP.mode=='tracked')renderSp();});
+function cx(e){const r=spec.getBoundingClientRect();return Math.max(0,Math.min(SW,(e.clientX-r.left)/r.width*SW));}
+spec.addEventListener('pointerdown',e=>{selX0=cx(e);spec.setPointerCapture(e.pointerId);});
+spec.addEventListener('pointermove',e=>{if(selX0==null)return;const a=Math.min(selX0,cx(e)),b=Math.max(selX0,cx(e));if(b-a>3)sel=[xf(a),xf(b)];});
+spec.addEventListener('pointerup',e=>{if(selX0==null)return;const x1=cx(e);let a=Math.min(selX0,x1),b=Math.max(selX0,x1);selX0=null;
+ if(b-a<=3){const f=xf(x1);sel=[f/Math.pow(2,1/6),f*Math.pow(2,1/6)];}else sel=[xf(a),xf(b)];inspect();});
+let PK=null;
+async function inspect(){if(!sel)return;if(!ES){$('snd_warn').textContent='Press Listen first, then pick a sound.';return;}
+ const j=await (await fetch(`/api/sound/inspect?lo=${sel[0].toFixed(1)}&hi=${sel[1].toFixed(1)}`)).json();
+ if(j.error){$('snd_warn').textContent=j.error;return;}PK=j;$('pick').className='';
+ $('pk_hz').textContent=(j.peak_hz>=1000?(j.peak_hz/1000).toFixed(2)+' kHz':Math.round(j.peak_hz)+' Hz');$('pk_lbl').textContent=j.label;
+ $('pk_det').textContent=`Band ${j.lo}-${j.hi} Hz, level ${j.level_db} dB (relative), ${j.tonal?'a clear tone':'spread out (no single tone)'}, ${j.steady?'steady':'changing'} (varies ${j.variation_db} dB).`;
+ $('pk_harm').checked=/hum/.test(j.label);}
+async function notch(kind){if(!PK)return;const f=PK.peak_hz,fs=$('pk_harm').checked?[f,2*f,3*f].filter(x=>x<11000):[f];
+ const r=await post('/api/sound/notch',JSON.stringify({kind,freqs:fs,hum:/hum/.test(PK.label)}));if(r.ok){sndLoad();setTimeout(sndLoad,6000);}}
+async function notchOff(kind){await post('/api/sound/notch',JSON.stringify({kind,freqs:[]}));sndLoad();}
+// ---- spatial ----
+let SP={},spT=null;
+document.querySelectorAll('#sp_modes button').forEach(b=>b.onclick=async()=>{const r=await post('/api/spatial',JSON.stringify({mode:b.dataset.m}));if(r.ok){SP=await r.json();renderSp();}});
+async function spCal(){const step=SP.calibrating?'done':'start';const j=await (await fetch('/api/spatial/calibrate',{method:'POST',body:JSON.stringify({step})})).json();SP=j;renderSp();$('sp_st').textContent=j.calibration.text;}
+async function spRecenter(){SP=await (await fetch('/api/spatial/recenter',{method:'POST'})).json();renderSp();}
+function renderSp(){$('spcard').className=SP.available?'':'off';
+ document.querySelectorAll('#sp_modes button').forEach(b=>b.className=SP.mode==b.dataset.m?'on':'');
+ $('sp_tr').style.display=SP.mode=='tracked'?'':'none';$('sp_cal').textContent=SP.calibrating?'Done':'Calibrate';
+ $('sp_st').textContent=SP.error?SP.error:SP.mode=='off'?'Off':SP.mode=='fixed'?`Fixed speakers (HRTF ${SP.hrtf})`:
+  SP.calibrating?'Calibrating: turn your head 90° right, then press Done.':(SP.samples?`Head ${SP.yaw>0?'right':'left'} ${Math.abs(SP.yaw).toFixed(0)}° from the front`:'Waiting for head tracking from the AirPods...');
+ const c=$('sphead'),g=c.getContext('2d'),W=c.width,H=c.height,cx=W/2,cy=H/2+8;g.clearRect(0,0,W,H);
+ const on=SP.mode&&SP.mode!='off',yaw=SP.mode=='tracked'?SP.yaw*Math.PI/180:0;
+ for(const a of[-30,30]){const t=a*Math.PI/180,x=cx+Math.sin(t)*62,y=cy-Math.cos(t)*62;g.fillStyle=on?'#5fd0ff':'#33415a';g.fillRect(x-7,y-7,14,14);}
+ g.save();g.translate(cx,cy);g.rotate(yaw);g.fillStyle='#273345';g.strokeStyle=on?'#e8edf2':'#56708a';g.lineWidth=3;
+ g.beginPath();g.arc(0,0,22,0,7);g.fill();g.stroke();g.beginPath();g.moveTo(-7,-21);g.lineTo(0,-33);g.lineTo(7,-21);g.stroke();
+ g.fillStyle=on?'#e8edf2':'#56708a';g.fillRect(-27,-6,5,12);g.fillRect(22,-6,5,12);g.restore();
+ clearTimeout(spT);if(SP.mode=='tracked'&&!document.hidden)spT=setTimeout(async()=>{try{SP=await (await fetch('/api/spatial')).json();}catch(e){}renderSp();},120);}
+grid();sndLoad();
+load();setInterval(load,4000);
+</script>
