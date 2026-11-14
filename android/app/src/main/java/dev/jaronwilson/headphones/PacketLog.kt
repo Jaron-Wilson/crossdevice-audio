@@ -8,8 +8,8 @@ import android.content.Context
  * the Packets screen. In memory only: nothing is written to disk, and it is gone when the app process ends.
  * Every entry is masked (see [PacketDecode]) before it is stored, so no address, name, serial or key is kept.
  *
- * Fed from the few places packets cross the socket: [PhoneDirect.write] / [PhoneDirect.openAap] and its
- * reader, [HeadMic]'s link, and [CrusherDirect]'s session. Mic-stream audio (~130 packets a second) is folded
+ * Fed from the few places packets cross the socket: [PhoneDirect.write] (every AAP packet sent), the shared
+ * AAP link's one reader ([AapLink]), and [CrusherDirect]'s session. Mic-stream audio (~130 packets a second) is folded
  * into one "mic audio x N/s" line, updated at most once a second.
  */
 object PacketLog {

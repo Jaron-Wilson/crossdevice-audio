@@ -30,7 +30,8 @@ data class ProxAdvert(
     val oneInCase get() = status and 0x10 != 0
     /** Both buds are in the case (bit 2). */
     val bothInCase get() = status and 0x04 != 0
-    private val primaryLeft get() = status and 0x20 != 0
+    /** The primary bud (the one holding the link) is the left one (bit 5). */
+    val primaryLeft get() = status and 0x20 != 0
     private val xor get() = !primaryLeft xor thisInCase
     val leftInEar get() = if (xor) status and 0x08 != 0 else status and 0x02 != 0
     val rightInEar get() = if (xor) status and 0x02 != 0 else status and 0x08 != 0

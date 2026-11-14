@@ -77,6 +77,7 @@ class AapMicTest {
         val p = hex("04000400060000 02".replace(" ", ""))
         val e = PhoneDirect.earFrom(p, p.size)
         assertEquals(0 to 2, e)
-        assertEquals("one in ear, one in case", PhoneDirect.earText(e!!))
+        assertEquals("One bud in ear, the other in case (which is left isn't known yet)", PhoneDirect.earText(e!!))
+        assertEquals("Left: in case, Right: in ear", PhoneDirect.earText(e, primaryIsLeft = false))
     }
 }

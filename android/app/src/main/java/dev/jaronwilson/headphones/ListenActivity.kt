@@ -325,7 +325,7 @@ class ListenActivity : Activity(), HeadMic.Listener {
     override fun onFrame(analyzer: SoundAnalyzer) = runOnUiThread {
         spectrum.set(analyzer.bins, analyzer.binCenters())
         level.text = "Level at the AirPods' mics: ${"%.0f".format(analyzer.levelDb)} dBFS (relative, not calibrated)" +
-            (mic?.ear?.let { "\nEars: " + PhoneDirect.earText(it) } ?: "")
+            (mic?.ear?.let { "\nEars: " + Ears.text(this) } ?: "")
         showLook()
         if (pendingOn) { pendingOn = false; FilteredHearing.turnOn(this)?.let { fhStatus.text = it } }
         refreshFh()

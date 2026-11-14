@@ -112,7 +112,20 @@ object FilteredHearing : HeadMic.Listener {
         mic = HeadMic(context.applicationContext, this).also { it.pcmSink = ::feed; it.start() }
     }
 
+    /** Set by [restart]: turn filtered hearing on once the stream is flowing. */
+    @Volatile private var autoOn = false
+
+    /** Ear detection: a bud went back in after it stopped listening. Plain listening only runs while its
+     *  screen is open, so that is restarted only then; filtered hearing also with the screen off. */
+    fun restart(context: Context, filtered: Boolean) {
+        if (mic != null) return
+        if (!filtered && ui == null) return
+        autoOn = filtered
+        startMic(context)
+    }
+
     fun stopMic(reason: String = "Stopped") {
+        autoOn = false
         if (on) turnOff()
         mic?.stop(reason)
     }
@@ -259,9 +272,13 @@ object FilteredHearing : HeadMic.Listener {
     }
 
     override fun onStatus(text: String) { ui?.onStatus(text) }
-    override fun onFrame(analyzer: SoundAnalyzer) { ui?.onFrame(analyzer) }
+    override fun onFrame(analyzer: SoundAnalyzer) {
+        if (autoOn) { autoOn = false; app?.let { c -> turnOn(c) } }
+        ui?.onFrame(analyzer)
+    }
     override fun onEnded(reason: String) {
         mic = null
+        autoOn = false
         if (on) turnOff()
         ui?.onEnded(reason)
     }

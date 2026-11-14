@@ -33,7 +33,7 @@ class PacketDecodeTest {
         val bat = hex("04000400040003" + "0201500101" + "02014B0101".replace("0201", "0401") + "0801280201")
         assertEquals("Battery: L 80% · R 75% · Case 40%+", PacketDecode.aap(bat, false).meaning)
         assertEquals("Ear detection: both in ear", PacketDecode.aap(hex("0400040006000000"), false).meaning)
-        assertEquals("Ear detection: one in ear, one in case", PacketDecode.aap(hex("0400040006000002"), false).meaning)
+        assertEquals("Ear detection: primary bud in ear, secondary in case", PacketDecode.aap(hex("0400040006000002"), false).meaning)
     }
 
     @Test fun openingSequenceAndMicControl() {

@@ -78,7 +78,8 @@ object PacketDecode {
         val meaning = if (!isAap(p)) session(p, sent) else when (val op = u(p, 4) or (u(p, 5) shl 8)) {
             0x09 -> control(p, sent)
             0x04 -> AapTrack.batteryFrom(p)?.let { "Battery: $it" } ?: "Battery report (nothing connected)"
-            0x06 -> PhoneDirect.earFrom(p, p.size)?.let { "Ear detection: ${PhoneDirect.earText(it)}" } ?: "Ear detection (short packet)"
+            0x06 -> EarReport.decode(p)?.let { if (it.primary == it.secondary) "Ear detection: both ${it.primary.words}"
+                else "Ear detection: primary bud ${it.primary.words}, secondary ${it.secondary.words}" } ?: "Ear detection (short packet)"
             0x0F -> "Turn on notifications"
             0x4D -> if (sent) "Feature flags" else "Feature flags reply"
             0x0E -> {

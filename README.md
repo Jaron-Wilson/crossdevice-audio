@@ -300,6 +300,35 @@ SENT Crusher  Ask the noise mode
 - The last 500 packets are kept in memory only, never written to disk. Pause, Clear, a device filter and Copy
   (the masked text). *Read AirPods* and *Read Crusher* only ask for the current state; they change nothing.
 
+## Ear detection (Android 1.9.0)
+
+The AirPods sense on their own whether each bud is in an ear, out, or in the case, and push a report (AAP
+`0x06`) the moment it changes. 1.9.0 listens for it all the time the AirPods are on the phone and acts on it,
+like an iPhone:
+
+- **Live status** on the main screen, the widget and the Listen screen: "Left: in ear, Right: in case (live,
+  since 14:02)", or "(last seen 5 min ago)" when the link isn't open.
+- **Auto-pause**: a bud leaving an ear while media plays pauses it (the same pause key a headset button
+  sends, so no extra permission). **Auto-resume** only if the app paused it and the bud goes back within
+  2 minutes; both buds into the case means no resume. Nothing happens during a call, and auto-pause is
+  skipped while filtered hearing plays (the phone can't tell your media from it then).
+- **Listening / filtered hearing** stops when no bud is in an ear; optionally it starts again if one goes back
+  in within 2 minutes (off by default).
+- A change has to hold 0.4 s to count, so brushing a bud against your ear doesn't pause anything.
+
+Every action has its own switch under *Ear detection* (all on by default except the restart). The master switch
+"Ear detection features" turns the whole thing off. How it works: a small foreground service (`EarService`,
+type "connected device", a silent minimum-priority notification) starts when the AirPods connect and stops when
+they leave. It holds the app's **one** AAP link (`AapLink`), which everything else now shares: the mic stream,
+mode taps, settings reads and the widget send on that link instead of opening a second one, and one reader
+thread feeds the Packets log and every user of the link. It costs almost nothing: no polling, the service
+sleeps until the AirPods send something.
+
+Left or right: the report is ordered primary bud first, not left first. The app learns which bud is the primary
+from the AAP battery report (it lists the primary first) or, until one arrives, from the BLE advert's "primary
+is left" bit; details in [PROTOCOL.md](docs/PROTOCOL.md#ear-detection-left-and-right-android-190). Until it knows, it says
+"One bud in ear, the other in case".
+
 ## Repository layout
 
 | Path | What it is |
@@ -313,7 +342,7 @@ SENT Crusher  Ask the noise mode
 | `laptop/apple-did.sh` | Switches BlueZ to Apple's Device ID (and back with `undo`). |
 | `windows/crusher_win.py` | Crusher control on Windows with no driver: RFCOMM through Winsock `AF_BTH` via ctypes. |
 | `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, and the Windows connection check. |
-| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Last seen and Find (`Tracker.kt`, `TrackActivity.kt`, `FinderActivity.kt`, the testable parts in `TrackLogic.kt`) and Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`) and Packets (`PacketsActivity.kt`, `PacketLog.kt`, the testable `PacketDecode.kt`). |
+| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Last seen and Find (`Tracker.kt`, `TrackActivity.kt`, `FinderActivity.kt`, the testable parts in `TrackLogic.kt`) and Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`) and Packets (`PacketsActivity.kt`, `PacketLog.kt`, the testable `PacketDecode.kt`) and Ear detection (`EarService.kt`, the shared link `AapLink.kt`, the testable `EarLogic.kt`). |
 | `docs/HOW-IT-WORKS.md` | The multi-device findings, with the packets that prove them. |
 | `docs/PROTOCOL.md` | The Crusher AT commands, the AAP packets, the BLE battery format and the panel API. |
 

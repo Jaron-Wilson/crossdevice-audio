@@ -25,9 +25,9 @@ class HeadphonesWidget : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         scheduleRefresh(context)
-        val pending = goAsync()
+        val pending = finishSoon(goAsync())
         thread {
-            try { refresh(context) } finally { pending.finish() }
+            try { refresh(context) } finally { pending() }
         }
     }
 
@@ -43,10 +43,10 @@ class HeadphonesWidget : AppWidgetProvider() {
         }
         // Show the choice at once (optimistic), then confirm with the panel's real state.
         render(context, optimistic(last, cmd), if (cmd == "refresh") "Refreshing…" else null)
-        val pending = goAsync()
+        val pending = finishSoon(goAsync())
         val app = context.applicationContext
         if (cmd == "refresh") {
-            work.execute { try { refresh(app) } finally { pending.finish() } }
+            work.execute { try { refresh(app) } finally { pending() } }
             return
         }
         // Spamming buttons used to start one slow Bluetooth session per tap; they piled up and the OS
@@ -62,12 +62,26 @@ class HeadphonesWidget : AppWidgetProvider() {
                 if (err == null) refresh(app)
                 else render(app, withPhoneBattery(app, fetch(app)), failText(app, full, err))
             } finally {
-                pending.finish()
+                pending()
             }
         }
     }
 
     companion object {
+        /**
+         * A refresh (a short BLE scan, the laptop, a Bluetooth read) can take longer than the 10 s Android
+         * gives a widget broadcast; holding it past that is an ANR, which kills the app (and its services).
+         * So the broadcast is released after [HOLD_MS] at the latest; the work carries on. Returns the
+         * "done" call for the end of the work (safe to call twice).
+         */
+        private fun finishSoon(p: android.content.BroadcastReceiver.PendingResult): () -> Unit {
+            val done = java.util.concurrent.atomic.AtomicBoolean(false)
+            val finish = { if (done.compareAndSet(false, true)) runCatching { p.finish() } }
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ finish() }, HOLD_MS)
+            return { finish() }
+        }
+        private const val HOLD_MS = 8_000L
+
         private const val ACTION = "dev.jaronwilson.headphones.CMD"
         private const val EXTRA_CMD = "cmd"
 
@@ -227,7 +241,7 @@ class HeadphonesWidget : AppWidgetProvider() {
             val onPhone = Handoff.local(context)
             val status = when {
                 note != null -> note
-                onPhone -> "On this phone" + batteryText(ap).let { if (it.isEmpty()) "" else " · $it" } +
+                onPhone -> "On this phone" + Ears.liveText(context).ifEmpty { batteryText(ap) }.let { if (it.isEmpty()) "" else " · $it" } +
                     (if (PhoneDirect.status(context) == "fail") " · hold stem for modes" else "")
                 !Config.hasAirPods(context) && !Config.hasPanel(context) && !crOn -> "Open the Headphones app to set up"
                 state == null && !Config.hasPanel(context) -> "AirPods not connected to this phone"

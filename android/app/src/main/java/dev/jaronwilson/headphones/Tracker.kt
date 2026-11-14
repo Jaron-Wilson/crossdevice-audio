@@ -260,6 +260,7 @@ object Tracker {
         val m = AdvertMatch.match(address, ad, identity(c))
         if (m == MatchLevel.EXACT || m == MatchLevel.LIKELY) {
             refreshPattern(c, ad)
+            Ears.onAdvert(c, ad.primaryLeft)
             rememberBattery(c, AIRPODS, ad.batteryText(), ad.budsText())
             sawNearby(c, AIRPODS, rssi, ad.batteryText(), ad.budsText(), if (m == MatchLevel.EXACT) "matched by key" else "likely yours (model + battery)")
         }

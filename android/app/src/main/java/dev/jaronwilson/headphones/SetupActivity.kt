@@ -77,6 +77,9 @@ class SetupActivity : Activity() {
     private val apModeBtns = LinkedHashMap<String, Button>()
     private val crModeBtns = LinkedHashMap<String, Button>()
     private lateinit var apEar: TextView
+    private lateinit var earLive: TextView
+    private val earSw = LinkedHashMap<String, Switch>()
+    private val earWatch: () -> Unit = { runOnUiThread { bindEar(Handoff.local(this)) } }
     private val crSwitches = LinkedHashMap<String, Switch>()
     private var lastEqPush = 0L
 
@@ -110,6 +113,14 @@ class SetupActivity : Activity() {
         super.onResume()
         loadControls()
         if (::smartNote.isInitialized) { SmartAdaptive.sync(this); refreshSmart() }
+        EarService.sync(this)
+        Ears.watch(earWatch)
+        if (::earLive.isInitialized) bindEar(Handoff.local(this))
+    }
+
+    override fun onPause() {
+        super.onPause()
+        Ears.unwatch(earWatch)
     }
 
     private companion object {
@@ -291,8 +302,31 @@ class SetupActivity : Activity() {
         cr.addView(crFeat)
         crBox.addView(cr)
         col.addView(crBox)
+        buildEars(col)
         buildSmart(col)
         refreshEq()
+    }
+
+    // ---- Ear detection ----
+    private fun buildEars(col: LinearLayout) {
+        col.addView(label("Ear detection", 15f, "#E8EDF2"))
+        val c = card()
+        earLive = TextView(this).apply { textSize = 14f; setTextColor(Color.parseColor("#99FFBB")); setPadding(0, dp(8), 0, dp(4)) }
+        c.addView(earLive)
+        c.addView(TextView(this).apply {
+            text = "The AirPods sense when a bud is in an ear or in the case and tell the phone at once. While " +
+                "they're on this phone the app keeps one quiet link open to hear that (a silent notification shows " +
+                "it), and acts on it like an iPhone does. A change has to hold 0.4 s to count. Never during a call."
+            textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, 0, 0, dp(4))
+        })
+        for ((k, spec) in EarPrefs.SWITCHES) {
+            earSw[k] = switch(spec.first) { on ->
+                EarPrefs.set(this, k, on)
+                if (k == "on") { EarService.sync(this); bindEar(Handoff.local(this)) }
+            }.apply { isChecked = EarPrefs.get(this@SetupActivity, k); if (k != "on") textSize = 14f }.also { c.addView(it) }
+        }
+        col.addView(c, lp(0))
+        bindEar(Handoff.local(this))
     }
 
     // ---- Smart adaptive ----
@@ -549,10 +583,16 @@ class SetupActivity : Activity() {
 
     /** What the AirPods last reported about themselves: in ear / in case (AAP 0x06, sensed by the buds). */
     private fun bindEar(onPhone: Boolean) {
-        val e = if (onPhone) PhoneDirect.ear(this) else null
-        apEar.text = e?.let { (pair, t) ->
-            "Ears: ${PhoneDirect.earText(pair)} (reported by the AirPods " +
-                android.text.format.DateUtils.getRelativeTimeSpanString(t) + ")" } ?: ""
+        val t = Ears.text(this)
+        if (::apEar.isInitialized) apEar.text = if (onPhone && t.isNotEmpty()) "Ears: $t" else ""
+        if (!::earLive.isInitialized) return
+        earLive.text = when {
+            !EarPrefs.enabled(this) -> "Off." + (if (t.isNotEmpty()) " Last report: $t" else "")
+            !onPhone -> "The AirPods aren't on this phone." + (if (t.isNotEmpty()) " Last report: $t" else "")
+            t.isEmpty() -> "Waiting for the AirPods' first report..."
+            else -> t
+        }
+        for ((k, sw) in earSw) if (k != "on") sw.isEnabled = EarPrefs.enabled(this)
     }
 
     private fun setCrMode(mode: String) {

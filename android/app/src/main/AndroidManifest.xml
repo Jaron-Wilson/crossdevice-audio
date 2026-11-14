@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Ear detection: one quiet link to the AirPods while they are connected (a "connected device" service) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Smart adaptive: "are you walking" from the phone's motion sensors (asked when you turn it on) -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
@@ -136,6 +138,12 @@
                 <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
             </intent-filter>
         </receiver>
+
+        <!-- Ear detection: holds the AirPods' AAP link while they're on this phone, for their in-ear reports -->
+        <service
+            android:name=".EarService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- keeps the EQ effects alive while the app isn't on screen -->
         <service

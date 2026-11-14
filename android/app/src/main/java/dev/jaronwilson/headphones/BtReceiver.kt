@@ -18,7 +18,11 @@ class BtReceiver : BroadcastReceiver() {
         val which = Tracker.deviceOf(context, dev) ?: return
         val onPhone = intent.action == BluetoothDevice.ACTION_ACL_CONNECTED
         val isAirPods = which == Tracker.AIRPODS
-        if (isAirPods) Handoff.setLocal(context, onPhone)
+        if (isAirPods) {
+            Handoff.setLocal(context, onPhone)
+            // Ear detection: hold the AAP link while they're here (a Bluetooth broadcast may start it)
+            EarService.sync(context)
+        }
         // Last seen: note the connect, or save time/battery (and location, if allowed) on disconnect.
         if (onPhone) Tracker.onConnected(context, which)
         val pending = goAsync()

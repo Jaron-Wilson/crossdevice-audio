@@ -113,7 +113,7 @@ Apple manufacturer data `0x004C`, first byte `0x07`. As a hex string `h` of that
 
 | Message | Bytes | Meaning |
 |---|---|---|
-| Ear detection | `04 00 04 00 06 00 <primary> <secondary>` | 0 in ear, 1 out of ear, 2 in case. Sent on changes |
+| Ear detection | `04 00 04 00 06 00 <primary> <secondary>` | 0 in ear, 1 out of ear, 2 in case. Sent on changes and once right after the notification request (seen) |
 | Conversation Awareness | `04 00 04 00 4B 00 02 00 01 <level>` | The wearer started (01/02) or stopped (03) speaking; 08/09 normal. Only while CA is on |
 | Microphone stream start | `04 00 04 00 58 00 00 00 09 00 00 01 82 00 00 00 04 96 00` | Asks for the mic stream |
 | Microphone stream stop | `04 00 04 00 58 00 00 00 02 00 03 01` | |
@@ -130,6 +130,32 @@ known that reports an ambient noise *level*: Adaptive Audio measures it inside t
 The Crusher reports nothing it senses over AT: `AT.UIAUDIO?` and its unsolicited `.UIAUDIO` lines give only the
 mode, `AT.CRUSHER?` the bass. The Airoha SDK inside Skull-iQ has an "environment detection" call (stationary
 noise per side, ANC gains), but Skull-iQ never calls it, and it would go over Airoha's RACE transport, not AT.
+
+### Ear detection: left and right (Android 1.9.0)
+
+The `0x06` report is ordered **primary bud first**, not left first. The primary is the bud that holds the link to
+the phone (and the microphone); when it leaves the ear the AirPods hand that role to the other bud and send the
+report again with the pair exchanged (LibrePods, "AAP Definitions"). So `00 02` means "one bud in ear, the other
+in the case", and which one is left needs a second source. The app uses, in this order:
+
+1. **The AAP battery report** (`0x04`, above). It lists the primary bud first: type `02` (left) before `04`
+   (right) means the left bud is primary. This is how LibrePods' Linux app finds the primary (`battery.hpp`,
+   "first pod is primary", used by `deviceinfo.hpp` for left/right in-ear). It comes on the same link as the ear
+   report, so it is the most direct source. Chosen first for that reason. The AirPods send it "occasionally"
+   (on battery and bud changes), not always right after the link opens.
+2. **The BLE proximity advert**, status bit 5 ("left bud is primary", LibrePods and OpenPods), when one of the
+   app's short scans heard *your* AirPods (matched by IRK or model and battery) in the last 10 minutes. Used only
+   until a battery report arrives on the link.
+3. **Role swap inference**: a report `(a, b)` followed within 2 s by `(b, a)`, with no battery report in between,
+   is the primary hand-off, so the known side flips with it.
+
+If none of these is known yet, the app says "One bud in ear, the other in case (which is left isn't known yet)"
+instead of guessing. The pause and listening rules don't need the sides: they count buds in an ear.
+
+The app keeps **one** AAP link per phone (`AapLink.kt`): ear detection holds it while the AirPods are connected,
+and the mic stream and short reads or settings join it rather than opening a second link (the AirPods expect one
+link per host). The opening sequence (handshake, features `0x4D`, notifications `0x0F`) is sent once, when the
+first user opens it.
 
 ### Proximity keys over AAP (Android Last seen / finder)
 
@@ -149,7 +175,7 @@ doesn't send one.
 ### Seeing the packets live (Android Packets screen)
 
 The phone app's *Packets* screen (1.8.0) logs every AAP packet and AT command/reply at the one place each
-crosses the socket (`PhoneDirect.write` and the AAP readers, `CrusherDirect`'s session) and decodes them with
+crosses the socket (`PhoneDirect.write` and the shared AAP link's reader in `AapLink`, `CrusherDirect`'s session) and decodes them with
 the tables above. Opcodes it decodes: `0x04` battery, `0x06` ear detection, `0x09` control commands, `0x0E`
 audio source, `0x0F` notifications, `0x17` head tracking, `0x1A` rename, `0x1D` device info, `0x2E` connected
 devices, `0x30`/`0x31` proximity keys, `0x4B` Conversation Awareness, `0x4D` feature flags, `0x58` mic stream;

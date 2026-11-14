@@ -1,6 +1,5 @@
 package dev.jaronwilson.headphones
 
-import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.media.AudioManager
 import android.media.MediaCodec
@@ -18,8 +17,8 @@ import kotlin.concurrent.thread
  * is analysed and dropped.
  *
  * Like LibrePods, Conversation Awareness is turned off while the stream runs (it is put back afterwards).
- * The AirPods hold one AAP link per host, so this owns it for the session; the app's other AirPods
- * controls go through [send] meanwhile.
+ * The AirPods hold one AAP link per host, so this joins the app's one link ([AapLink], as "mic"): opened for
+ * it if nothing else has it open, otherwise shared with ear detection and the app's other AirPods controls.
  *
  * Experimental: the stream is documented by LibrePods, not by Apple, and hasn't been confirmed on every
  * firmware. If no audio arrives within [NO_AUDIO_MS] the session ends and says so. It never falls back to
@@ -33,7 +32,12 @@ class HeadMic(private val context: Context, private val listener: Listener) {
     }
 
     @Volatile var analyzer = SoundAnalyzer(); private set
-    @Volatile private var sock: BluetoothSocket? = null
+    /** Holding the shared AAP link right now. */
+    @Volatile private var linked = false
+    /** This session's name on the shared link. */
+    private val who = "mic#" + Integer.toHexString(System.identityHashCode(this))
+    @Volatile private var lastAudio = 0L
+    @Volatile private var gotAudio = false
     @Volatile private var running = false
     @Volatile private var caBefore: Int? = null           // 0x28 as the AirPods reported it (1 on, 2 off)
     @Volatile var ear: Pair<Int, Int>? = null; private set
@@ -62,9 +66,7 @@ class HeadMic(private val context: Context, private val listener: Listener) {
     }
 
     /** Send an AAP packet on this session's link (mode changes while listening). */
-    fun send(pkt: ByteArray): Boolean = runCatching {
-        PhoneDirect.write(context, sock?.outputStream ?: return false, pkt)
-    }.isSuccess
+    fun send(pkt: ByteArray): Boolean = linked && AapLink.send(context, pkt)
 
     private fun run() {
         // During a call (phone or VoIP) the AirPods' microphones belong to it (HFP), and they don't answer the
@@ -77,90 +79,41 @@ class HeadMic(private val context: Context, private val listener: Listener) {
             listener.onEnded("A call is using the AirPods' microphones right now. Try again after it.")
             return
         }
-        val s = try {
+        try {
             listener.onStatus("Connecting to the AirPods...")
-            // Wait for any short AAP session of this app (widget refresh, a mode tap) to end, then claim the
-            // link: from here on those go through [send] instead of opening a second link.
-            // A link that was just closed (by this app or another host) can refuse the next connect for a
-            // moment: try a few times.
+            // Join the app's one AAP link (waits for any short exchange of this app to finish). A link that was
+            // just closed (by this app or another host) can refuse the next connect for a moment: try a few times.
             var tries = 0
             while (true) {
-                val r = runCatching {
-                    synchronized(PhoneDirect.aapLock) {
-                        PhoneDirect.openAap(context).also { sock = it; PhoneDirect.live = ::send }
-                    }
-                }
+                val r = runCatching { AapLink.acquire(context, who, rx) }
                 if (r.isSuccess) break
                 Log.w(TAG, "AAP connect failed (try ${tries + 1})", r.exceptionOrNull())
                 if (++tries >= 3 || !running) throw r.exceptionOrNull()!!
                 Thread.sleep(1200)
             }
-            sock!!
+            linked = true
         } catch (e: Throwable) {
             running = false
             listener.onEnded("Couldn't open the AirPods' control channel: " + ((e.cause ?: e).message ?: e.javaClass.simpleName))
             return
         }
-        sock = s
         if (!running) { Log.d(TAG, "stopped while connecting"); finish("Stopped"); return }
         try {
             decoder = makeDecoder()
         } catch (e: Throwable) {
-            running = false; runCatching { s.close() }; sock = null
+            running = false
+            synchronized(PhoneDirect.aapLock) { linked = false; AapLink.release(who, rx) }
             listener.onEnded("This phone has no AAC-ELD decoder: ${e.message}")
             return
         }
-        val buf = ByteArray(maxOf(8192, runCatching { s.maxReceivePacketSize }.getOrDefault(0)))
-        Log.d(TAG, "AAP socket open: connected=${s.isConnected} maxRx=${runCatching { s.maxReceivePacketSize }.getOrNull()} " +
-            "maxTx=${runCatching { s.maxTransmitPacketSize }.getOrNull()} decoder=${runCatching { decoder?.name }.getOrNull()}")
+        Log.d(TAG, "on the AAP link with ${AapLink.holders()} decoder=${runCatching { decoder?.name }.getOrNull()}")
         val started = System.currentTimeMillis()
         var startSent = 0L
-        var lastAudio = 0L
-        var gotAudio = false
         try {
-            val input = s.inputStream
-            // Reader: settings first (to learn Conversation Awareness), then audio.
-            val reader = thread(name = "headmic-rx", isDaemon = true) {
-                runCatching {
-                    while (running) {
-                        val n = input.read(buf)
-                        if (n <= 0) break
-                        rxCount++
-                        PacketLog.aap(context, false, buf, n)
-                        val isMic = n >= 6 && buf[4] == 0x58.toByte() && buf[5] == 0.toByte()
-                        // Packet dumps (they can hold device addresses): adb shell setprop log.tag.HeadMic VERBOSE
-                        if (dump && (!isMic || micCount < 20 || micCount % 1000 == 0))
-                            Log.v(TAG, "rx #$rxCount len=$n ${hexHead(buf, n)}")
-                        if (isMic) micCount++
-                        if (isMic && n >= 8 && buf[6] == 0.toByte() && buf[7] == 0.toByte() && !acked) {
-                            acked = true; Log.d(TAG, "the AirPods answered the stream request: ${hexHead(buf, n)}")
-                        }
-                        if (n > 6 && buf[4] == 0x1D.toByte() && buf[5] == 0.toByte()) {
-                            // Device information: log only the model and firmware-looking strings (no serials)
-                            val parts = String(buf, 6, n - 6, Charsets.ISO_8859_1).split('\u0000')
-                                .map { it.filter { c -> c in ' '..'~' } }.filter { it.length >= 3 }
-                            Log.d(TAG, "AirPods info: " + parts.filter { PacketDecode.NOT_PERSONAL.matches(it) })
-                        }
-                        if (AapMic.isAudio(buf, n)) {
-                            lastAudio = System.currentTimeMillis(); gotAudio = true
-                            for (au in AapMic.demux(buf, n)) decode(au)
-                            continue
-                        }
-                        PhoneDirect.earFrom(buf, n)?.let {
-                            if (it != ear) Log.d(TAG, "ear: ${PhoneDirect.earText(it)} (mic packets so far $micCount)")
-                            ear = it; PhoneDirect.rememberEar(context, it)
-                        }
-                        for (i in 0..n - 8) if (buf[i] == 0x04.toByte() && buf[i + 2] == 0x04.toByte() &&
-                            buf[i + 4] == 0x09.toByte() && buf[i + 5] == 0.toByte()) {
-                            val id = buf[i + 6].toInt() and 0xFF; val v = buf[i + 7].toInt() and 0xFF
-                            if (id == 0x28 && caBefore == null) caBefore = v
-                            if (id == 0x0D) mode = v
-                        }
-                    }
-                }
-                if (running) { running = false; finish("The AirPods closed the link") }
-            }
             Thread.sleep(700)                         // the settings burst after the notification request
+            // The link was already open (ear detection holds it): the burst came earlier, and the app kept it.
+            if (caBefore == null) caBefore = PhoneDirect.ctlValue(context, 0x28)
+            if (mode == null) mode = PhoneDirect.ctlValue(context, 0x0D)
             // If an earlier session ended without putting Conversation Awareness back (the app was killed),
             // it still reads "off" here: put back what the user had, from what that session wrote down.
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -199,30 +152,74 @@ class HeadMic(private val context: Context, private val listener: Listener) {
                 }
                 if (now - started > maxMs) { running = false; finish("Stopped after ${maxMs / 60000} minutes"); break }
             }
-            reader.join(500)
         } catch (e: Throwable) {
             if (running) { running = false; finish("Error: ${e.message ?: e.javaClass.simpleName}") }
         } finally {
-            if (sock != null) finish("Stopped")      // stop() raced with the start: never leave the stream running
+            if (linked) finish("Stopped")            // stop() raced with the start: never leave the stream running
         }
     }
 
     @Synchronized private fun finish(reason: String) {
         Log.d(TAG, "finish: $reason (rx=$rxCount mic=$micCount au=$auCount pcm=$pcmCount)")
-        val s = sock ?: run { listener.onEnded(reason); return }
-        synchronized(PhoneDirect.aapLock) {             // no other AAP link until this one is closed
-            sock = null
-            PhoneDirect.live = null
-            runCatching { PhoneDirect.write(context, s.outputStream, AapMic.STOP) }
+        if (!linked) { listener.onEnded(reason); return }
+        synchronized(PhoneDirect.aapLock) {             // the link closes only if nothing else holds it
+            linked = false
+            AapLink.send(context, AapMic.STOP)
             if (caBefore == 1) runCatching {
-                Thread.sleep(150); PhoneDirect.write(context, s.outputStream, PhoneDirect.controlPacket(0x28, 1))
+                Thread.sleep(150); AapLink.send(context, PhoneDirect.controlPacket(0x28, 1))
                 context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_CA).apply()
             }
-            runCatching { Thread.sleep(150); s.close() }
+            runCatching { Thread.sleep(150) }
+            AapLink.release(who, rx)
         }
         runCatching { decoder?.stop(); decoder?.release() }
         decoder = null
         listener.onEnded(reason)
+    }
+
+    /** Every packet on the shared link, on its reader thread: settings first (to learn Conversation Awareness),
+     *  then audio. */
+    private val rx = object : AapLink.Listener {
+        override fun onPacket(p: ByteArray, n: Int) {
+            if (!running) return
+            val buf = p
+            rxCount++
+            val isMic = n >= 6 && buf[4] == 0x58.toByte() && buf[5] == 0.toByte()
+            // Packet dumps (they can hold device addresses): adb shell setprop log.tag.HeadMic VERBOSE
+            if (dump && (!isMic || micCount < 20 || micCount % 1000 == 0))
+                Log.v(TAG, "rx #$rxCount len=$n ${hexHead(buf, n)}")
+            if (isMic) micCount++
+            if (isMic && n >= 8 && buf[6] == 0.toByte() && buf[7] == 0.toByte() && !acked) {
+                acked = true; Log.d(TAG, "the AirPods answered the stream request: ${hexHead(buf, n)}")
+            }
+            if (n > 6 && buf[4] == 0x1D.toByte() && buf[5] == 0.toByte()) {
+                // Device information: log only the model and firmware-looking strings (no serials)
+                val parts = String(buf, 6, n - 6, Charsets.ISO_8859_1).split('\u0000')
+                    .map { it.filter { c -> c in ' '..'~' } }.filter { it.length >= 3 }
+                Log.d(TAG, "AirPods info: " + parts.filter { PacketDecode.NOT_PERSONAL.matches(it) })
+            }
+            if (AapMic.isAudio(buf, n)) {
+                lastAudio = System.currentTimeMillis(); gotAudio = true
+                for (au in AapMic.demux(buf, n)) decode(au)
+                return
+            }
+            // (the ear report itself is kept by AapLink for the whole app; this copy is for the Listen screen)
+            PhoneDirect.earFrom(buf, n)?.let {
+                if (it != ear) Log.d(TAG, "ear: ${PhoneDirect.earText(it)} (mic packets so far $micCount)")
+                ear = it
+            }
+            for (i in 0..n - 8) if (buf[i] == 0x04.toByte() && buf[i + 2] == 0x04.toByte() &&
+                buf[i + 4] == 0x09.toByte() && buf[i + 5] == 0.toByte()) {
+                val id = buf[i + 6].toInt() and 0xFF; val v = buf[i + 7].toInt() and 0xFF
+                if (id == 0x28 && caBefore == null) caBefore = v
+                if (id == 0x0D) mode = v
+            }
+        }
+
+        override fun onClosed() {
+            linked = false
+            if (running) { running = false; finish("The AirPods closed the link") }
+        }
     }
 
     private fun makeDecoder(): MediaCodec {

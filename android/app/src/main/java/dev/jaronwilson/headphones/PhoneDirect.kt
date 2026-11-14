@@ -50,7 +50,7 @@ object PhoneDirect {
     private fun hex(s: String) = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
     /** Classic L2CAP socket to the AirPods' AAP channel, through hidden API (no root). */
-    private fun socket(dev: BluetoothDevice): BluetoothSocket {
+    internal fun socket(dev: BluetoothDevice): BluetoothSocket {
         HiddenApiBypass.addHiddenApiExemptions("Landroid/bluetooth/")
         // 1) BluetoothDevice.createL2capSocket(int) if this build still has it
         runCatching {
@@ -79,20 +79,34 @@ object PhoneDirect {
 
     private val NOTIFY = hex("040004000F00FFFFFEFF")
 
-    /** Open the AirPods' AAP channel and do the opening sequence (handshake, features, notifications).
-     *  For a long session that the caller owns (the headphone-mic listener); the caller closes it. */
-    fun openAap(context: Context): BluetoothSocket {
-        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: error("no Bluetooth")
-        val mac = Config.airpodsMac(context).ifEmpty { error("Pick your AirPods in the Headphones app") }
-        val sock = socket(adapter.getRemoteDevice(mac))
-        try {
-            sock.connect()
-            val out = sock.outputStream
-            write(context, out, HANDSHAKE); Thread.sleep(250)
-            write(context, out, FEATURES); Thread.sleep(150)
-            write(context, out, NOTIFY)
-        } catch (e: Throwable) { runCatching { sock.close() }; throw e }
-        return sock
+    /** The opening sequence on a fresh AAP link: handshake, features, notifications on (and, once, the IRK
+     *  request for Last seen). [AapLink] sends it; its reader is already running, so the reply burst is seen. */
+    internal fun hello(context: Context, out: java.io.OutputStream) {
+        write(context, out, HANDSHAKE); Thread.sleep(250)
+        write(context, out, FEATURES); Thread.sleep(150)
+        write(context, out, NOTIFY)
+        // Ask once for the key that resolves the AirPods' rotating BLE address (local only, see Tracker)
+        if (Tracker.wantIrk(context)) { Thread.sleep(150); write(context, out, AapTrack.REQUEST_IRK) }
+    }
+
+    /** What every packet from the AirPods teaches the app, whoever holds the link (called by [AapLink]). */
+    internal fun onReport(context: Context, buf: ByteArray, n: Int) {
+        // Last seen / finder: the battery packet and the IRK reply (see Tracker)
+        AapTrack.batteryFrom(buf, n)?.let { Tracker.rememberBattery(context, Tracker.AIRPODS, it) }
+        if (n >= 7 && buf[4] == 0x04.toByte() && buf[5] == 0.toByte() && buf[0] == 0x04.toByte() && buf[2] == 0x04.toByte())
+            android.util.Log.d("Ears", "battery report, component order: " + (0 until (buf[6].toInt() and 0xFF))
+                .mapNotNull { i -> (7 + 5 * i).takeIf { it < n }?.let { buf[it].toInt() and 0xFF } }
+                .joinToString(",") { when (it) { 2 -> "L"; 4 -> "R"; 8 -> "Case"; else -> "%02x".format(it) } })
+        SideTracker.primaryFromBattery(buf, n)?.let { Ears.onBattery(context, it) }
+        AapTrack.irkFrom(buf, n)?.let { Tracker.rememberIrk(context, it) }
+        EarReport.decode(buf, n)?.let { Ears.onRaw(context, it) }
+        if (n >= 8 && buf[0] == 0x04.toByte() && buf[1] == 0.toByte() && buf[2] == 0x04.toByte() &&
+            buf[3] == 0.toByte() && buf[4] == 0x09.toByte() && buf[5] == 0.toByte()) {
+            val id = buf[6].toInt() and 0xFF
+            val v = buf[7].toInt() and 0xFF
+            rememberCtl(context, mapOf(id to v))
+            if (id == 0x0D) rememberMode(context, NAMES[v])
+        }
     }
 
     /** Every AAP packet this app sends goes through here (and into the Packets screen's log). */
@@ -106,20 +120,14 @@ object PhoneDirect {
 
     /** Ear detection report 04 00 04 00 06 00 <primary> <secondary>: 0 in ear, 1 out of ear, 2 in case.
      *  Returns the pair, or null. The AirPods compute this themselves (LibrePods "AAP Definitions"). */
-    fun earFrom(p: ByteArray, n: Int): Pair<Int, Int>? {
-        for (i in 0..n - 8) if (p[i] == 0x04.toByte() && p[i + 1] == 0.toByte() && p[i + 2] == 0x04.toByte() &&
-            p[i + 3] == 0.toByte() && p[i + 4] == 0x06.toByte() && p[i + 5] == 0.toByte())
-            return (p[i + 6].toInt() and 0xFF) to (p[i + 7].toInt() and 0xFF)
-        return null
-    }
+    fun earFrom(p: ByteArray, n: Int): Pair<Int, Int>? = EarReport.decode(p, n)?.let { it.primary.code to it.secondary.code }
 
-    fun earText(e: Pair<Int, Int>): String {
-        val w = mapOf(0 to "in ear", 1 to "out of ear", 2 to "in case")
-        return if (e.first == e.second) "both ${w[e.first] ?: "?"}" else "one ${w[e.first] ?: "?"}, one ${w[e.second] ?: "?"}"
-    }
+    /** In words, with left and right when the app knows which bud is the primary (see [SideTracker]). */
+    fun earText(e: Pair<Int, Int>, primaryIsLeft: Boolean? = null): String = EarText.describe(EarReport.of(e), primaryIsLeft)
 
-    fun rememberEar(context: Context, e: Pair<Int, Int>) =
-        prefs(context).edit().putString("ear", "${e.first},${e.second}").putLong("ear_t", System.currentTimeMillis()).apply()
+    fun rememberEar(context: Context, e: Pair<Int, Int>, primaryIsLeft: Boolean? = null) =
+        prefs(context).edit().putString("ear", "${e.first},${e.second}").putLong("ear_t", System.currentTimeMillis())
+            .putInt("ear_pl", when (primaryIsLeft) { true -> 1; false -> 0; null -> -1 }).apply()
 
     /** The last ear-detection report and when it came, or null. */
     fun ear(context: Context): Pair<Pair<Int, Int>, Long>? {
@@ -127,6 +135,10 @@ object PhoneDirect {
         val (a, b) = s.split(",").map { it.toInt() }
         return (a to b) to prefs(context).getLong("ear_t", 0)
     }
+
+    /** Whether the primary was the left bud when the last ear report came (null: not known). */
+    fun earPrimaryLeft(context: Context): Boolean? = when (prefs(context).getInt("ear_pl", -1)) { 1 -> true; 0 -> false; else -> null }
+
     private val NAMES = mapOf(1 to "off", 2 to "anc", 3 to "transparency", 4 to "adaptive")
 
     /** name -> (control id, kind). kind: "bool" (1 on / 2 off), "level" (0-100), "mask" (modes). */
@@ -168,71 +180,36 @@ object PhoneDirect {
     }
 
     /**
-     * One short AAP session from the phone: handshake, ask for notifications, optionally set a mode,
-     * then listen [listenMs] for the AirPods' noise-mode report (04 00 04 00 09 00 0D <mode>).
-     * Returns the mode the AirPods report, or null if they said nothing in time.
+     * One short AAP exchange from the phone: optionally set a mode and controls, then listen up to [listenMs]
+     * for the AirPods to confirm (they echo 04 00 04 00 09 00 <id> <value>). Uses the app's one AAP link
+     * ([AapLink]): if it is already open (ear detection, the mic stream), the packets go on it; if not, it is
+     * opened for this exchange and closed after. Returns the mode the AirPods report, or null.
      */
     private fun session(context: Context, setTo: String?, listenMs: Long,
                         controls: List<Pair<Int, Int>> = emptyList()): String? = synchronized(aapLock) {
-        // While "What your AirPods hear" holds the link, a second AAP link from this phone gets in its way (seen:
-        // the listening link then received nothing at all): send through that session, answer reads from memory.
-        live?.let { send ->
-            if (setTo != null) send(modePacket(setTo))
-            for (c in controls) send(controlPacket(c.first, c.second))
-            return setTo ?: prefs(context).getString("mode", null)
-        }
-        sessionLocked(context, setTo, listenMs, controls)
-    }
-
-    /** Serialises this app's AAP links: one at a time, as the AirPods expect from one host. */
-    val aapLock = Any()
-    /** The [HeadMic] session's sender while it holds the AAP link (set and cleared under [aapLock]). */
-    @Volatile var live: ((ByteArray) -> Boolean)? = null
-
-    private fun sessionLocked(context: Context, setTo: String?, listenMs: Long,
-                              controls: List<Pair<Int, Int>>): String? {
-        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: error("no Bluetooth")
-        val mac = Config.airpodsMac(context).ifEmpty { error("Pick your AirPods in the Headphones app") }
-        val sock = socket(adapter.getRemoteDevice(mac))
         var seen: String? = null
         val ctl = java.util.concurrent.ConcurrentHashMap<Int, Int>()
-        try {
-            sock.connect()
-            val out = sock.outputStream
-            val reader = Thread {
-                val buf = ByteArray(1024)
-                runCatching {
-                    while (true) {
-                        val n = sock.inputStream.read(buf)
-                        if (n <= 0) break
-                        PacketLog.aap(context, false, buf, n)
-                        // Last seen / finder: the battery packet and the IRK reply (see Tracker)
-                        AapTrack.batteryFrom(buf, n)?.let { Tracker.rememberBattery(context, Tracker.AIRPODS, it) }
-                        AapTrack.irkFrom(buf, n)?.let { Tracker.rememberIrk(context, it) }
-                        earFrom(buf, n)?.let { rememberEar(context, it) }
-                        for (i in 0..n - 8) {
-                            if (buf[i] == 0x04.toByte() && buf[i + 1] == 0.toByte() && buf[i + 2] == 0x04.toByte() &&
-                                buf[i + 3] == 0.toByte() && buf[i + 4] == 0x09.toByte() && buf[i + 5] == 0.toByte()) {
-                                val id = buf[i + 6].toInt() and 0xFF
-                                ctl[id] = buf[i + 7].toInt() and 0xFF
-                                if (id == 0x0D) NAMES[buf[i + 7].toInt()]?.let { seen = it }
-                            }
-                        }
-                    }
+        val listener = object : AapLink.Listener {
+            override fun onPacket(p: ByteArray, n: Int) {
+                if (n >= 8 && p[0] == 0x04.toByte() && p[2] == 0x04.toByte() && p[4] == 0x09.toByte() && p[5] == 0.toByte()) {
+                    val id = p[6].toInt() and 0xFF
+                    ctl[id] = p[7].toInt() and 0xFF
+                    if (id == 0x0D) NAMES[p[7].toInt()]?.let { seen = it }
                 }
-            }.apply { isDaemon = true; start() }
-            write(context, out, HANDSHAKE); Thread.sleep(250)
-            write(context, out, FEATURES); Thread.sleep(150)
-            write(context, out, NOTIFY)
-            // Ask once for the key that resolves the AirPods' rotating BLE address (local only, see Tracker)
-            if (Tracker.wantIrk(context)) { Thread.sleep(150); write(context, out, AapTrack.REQUEST_IRK) }
+            }
+        }
+        val wasOpen = AapLink.isOpen
+        AapLink.acquire(context, "session", listener)
+        try {
+            // Already open: everything the AirPods report has been kept as it came, so a plain read is memory.
+            if (wasOpen && setTo == null && controls.isEmpty()) return prefs(context).getString("mode", null)
             if (setTo != null) {
                 Thread.sleep(150)
-                write(context, out, modePacket(setTo))
+                AapLink.send(context, modePacket(setTo))
             }
             for (c in controls) {
                 Thread.sleep(150)
-                write(context, out, controlPacket(c.first, c.second))
+                AapLink.send(context, controlPacket(c.first, c.second))
             }
             // Settings the AirPods never echo (see NO_ECHO) can't be confirmed; give the bytes a moment to
             // leave before the link closes. The rest are confirmed by the AirPods repeating them.
@@ -241,10 +218,10 @@ object PhoneDirect {
             val deadline = start + listenMs
             while (System.currentTimeMillis() < deadline) {
                 // a set is confirmed once the AirPods echo it; a plain read waits for the settings burst
-                val modeOk = seen != null && (setTo == null || seen == setTo)
+                val modeOk = (setTo == null && wasOpen) || (seen != null && (setTo == null || seen == setTo))
                 val now = System.currentTimeMillis()
                 val ctlOk = when {
-                    controls.isEmpty() -> ctl.size >= 3 && now - start > 600
+                    controls.isEmpty() -> wasOpen || (ctl.size >= 3 && now - start > 600)
                     echoed.isEmpty() -> now - start > 500
                     else -> echoed.all { ctl[it.first] == it.second }
                 }
@@ -252,14 +229,14 @@ object PhoneDirect {
                 if (controls.isNotEmpty() && setTo == null && ctlOk) break
                 Thread.sleep(50)
             }
-            runCatching { sock.close() }
-            reader.join(300)
         } finally {
-            runCatching { sock.close() }
+            AapLink.release("session", listener)
         }
-        if (ctl.isNotEmpty()) rememberCtl(context, ctl)
-        return seen
+        return seen ?: if (wasOpen) prefs(context).getString("mode", null) else null
     }
+
+    /** Serialises this app's use of the AAP link (see [AapLink]): one exchange at a time. */
+    val aapLock = Any()
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -272,6 +249,11 @@ object PhoneDirect {
         for ((k, v) in ctl) saved.put(k.toString(), v)
         prefs(context).edit().putString("ctl", saved.toString()).putLong("ctl_t", System.currentTimeMillis()).apply()
     }
+
+    /** One control value (0x09 id) as the AirPods last reported it, or null. */
+    fun ctlValue(context: Context, id: Int): Int? =
+        runCatching { JSONObject(prefs(context).getString("ctl", "{}")!!) }.getOrNull()
+            ?.opt(id.toString())?.let { (it as? Number)?.toInt() }
 
     /** The AirPods' settings as last reported to the phone (re-read if older than [maxAgeMs]).
      *  Same JSON shape as the laptop panel's airpods.settings; a missing value is JSON null. */
@@ -326,6 +308,12 @@ object PhoneDirect {
 
     /** Reconnect the AAP L2CAP link (not Bluetooth itself) so the AirPods report their settings again. */
     fun readBack(context: Context): JSONObject {
+        // With the link held open (ear detection), reopen it for a fresh report; else a short session does it.
+        if (AapLink.isOpen && runCatching { AapLink.reopen(context) }.getOrDefault(false)) {
+            Thread.sleep(1500)
+            remember(context, "ok", "")
+            return settings(context, Long.MAX_VALUE)
+        }
         runCatching { session(context, null, 2500) }.onSuccess { rememberMode(context, it) }.onFailure { e ->
             val why = (e.cause ?: e).let { it.message ?: it.javaClass.simpleName }
             remember(context, "fail", why); throw RuntimeException(why)
