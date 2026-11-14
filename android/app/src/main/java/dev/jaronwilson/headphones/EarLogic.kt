@@ -44,16 +44,19 @@ data class EarReport(val primary: Bud, val secondary: Bud) {
 }
 
 /**
- * Which bud is the primary: left or right. Two sources, in order of trust:
- *  1. The AAP battery report (`04 00 04 00 04 00 <count> [<type> 01 <level> <status> 01]...`, type 2 left,
- *     4 right, 8 case) lists the primary bud first. LibrePods' Linux app reads the primary this way
- *     (`battery.hpp`, "first pod is primary"). It comes on the same link as the ear report, at once when the
- *     link opens and again when a bud's state changes.
- *  2. The BLE proximity advert's status bit 5 ("primary is left", LibrePods and OpenPods), when the app's
- *     scans heard *your* AirPods recently. Used only until a battery report arrives on the link.
- * Plus one inference: the AirPods swap roles when the primary leaves the ear and re-send the report with the
- * pair exchanged; seeing `(a, b)` then `(b, a)` within [SWAP_MS], with no battery report in between, means the
- * roles swapped, so the side flips too.
+ * Which bud is the primary: left or right. The ear report only says "primary" and "secondary"; the primary is
+ * the bud holding the link, and it moves. Sources, the newest observation winning:
+ *  1. **The AAP battery report** (`04 00 04 00 04 00 <count> [<type> 01 <level> <status> 01]...`, type 2 left,
+ *     4 right, 8 case; status 1 discharging, 2 charging, 4 not connected). Its order is NOT the primary: on
+ *     AirPods Pro 2 it was L, R, Case with the right bud primary (checked live). But it says which bud is
+ *     charging, and a bud in the case charges (or drops off the link): when the ear report has exactly one bud
+ *     in the case and the battery report exactly one bud charging or not connected, that bud is the one in
+ *     the case, which tells primary from secondary. Used only when the battery report is no older than
+ *     [FRESH_MS] before the ear report, so a stale one can't mislabel a later change.
+ *  2. **The BLE proximity advert**'s status bit 5 ("left bud is primary", LibrePods Linux `blemanager.cpp`),
+ *     when a scan hears *your* AirPods.
+ *  3. **Role swap**: the AirPods hand the primary role over when the primary leaves the ear and re-send the
+ *     report with the pair exchanged; `(a, b)` then `(b, a)` within [SWAP_MS] flips the known side.
  * If none of these is known, [primaryIsLeft] is null and the text says "one bud / the other bud".
  */
 class SideTracker {
@@ -61,47 +64,68 @@ class SideTracker {
     /** "battery report", "Bluetooth advert", "role swap" or "" */
     var source = ""; private set
     private var lastEar: EarReport? = null
-    private var lastEarT = 0L
-    private var batterySinceEar = false
+    private var lastEarT = -1L
+    private var power: Pair<Int?, Int?>? = null
+    private var powerT = -1L
+    private var setSinceEar = false
 
-    /** A battery report on the link: [primaryLeft] from [primaryFromBattery]. */
-    fun onBattery(primaryLeft: Boolean) {
-        primaryIsLeft = primaryLeft; source = "battery report"; batterySinceEar = true
+    /** A battery report at [t]: each bud's status (1 discharging, 2 charging, 4 not connected; null if absent). */
+    fun onBattery(left: Int?, right: Int?, t: Long) {
+        power = left to right; powerT = t
+        infer()
     }
 
-    /** A recent advert's "primary is left" bit; only used while the link hasn't said. */
+    /** An advert's "primary is left" bit (an observation of now: it replaces older ones). */
     fun onAdvert(primaryLeft: Boolean) {
-        if (source == "battery report" || source == "role swap") return
-        primaryIsLeft = primaryLeft; source = "Bluetooth advert"
+        primaryIsLeft = primaryLeft; source = "Bluetooth advert"; setSinceEar = true
     }
 
     /** A raw (not debounced) ear report at time [t]. */
     fun onEar(r: EarReport, t: Long) {
         val prev = lastEar
-        if (prev != null && !batterySinceEar && t - lastEarT <= SWAP_MS && prev.primary != prev.secondary &&
+        if (prev != null && !setSinceEar && t - lastEarT <= SWAP_MS && prev.primary != prev.secondary &&
             r == prev.swapped() && r.known) {
             primaryIsLeft?.let { primaryIsLeft = !it; source = "role swap" }
         }
-        lastEar = r; lastEarT = t; batterySinceEar = false
+        lastEar = r; lastEarT = t; setSinceEar = false
+        infer()
+    }
+
+    /** One bud in the case by the ear report, and one bud charging (or off the link) by the battery report. */
+    private fun infer() {
+        val r = lastEar ?: return
+        val (l, rt) = power ?: return
+        if (powerT < lastEarT - FRESH_MS) return
+        val inCase = listOf(r.primary, r.secondary).count { it == Bud.IN_CASE }
+        if (inCase != 1) return
+        val lCase = l == 2 || l == 4
+        val rCase = rt == 2 || rt == 4
+        if (lCase == rCase) return
+        // the bud in the case is the left one iff lCase; the primary is that bud iff the primary is in the case
+        val pl = (r.primary == Bud.IN_CASE) == lCase
+        primaryIsLeft = pl; source = "battery report"; setSinceEar = true
     }
 
     /** The link closed: what it said no longer holds. */
-    fun reset() { primaryIsLeft = null; source = ""; lastEar = null; batterySinceEar = false }
+    fun reset() { primaryIsLeft = null; source = ""; lastEar = null; lastEarT = -1; power = null; powerT = -1; setSinceEar = false }
 
     companion object {
         const val SWAP_MS = 2000L
+        const val FRESH_MS = 5000L
 
-        /** From an AAP battery report: true if the left bud is listed first (primary), false if the right
-         *  is, null if this isn't a battery report or lists no bud. */
-        fun primaryFromBattery(p: ByteArray, n: Int = p.size): Boolean? {
+        /** From an AAP battery report: (left status, right status), each null if the bud isn't listed; or
+         *  null if this isn't a battery report. */
+        fun budStatus(p: ByteArray, n: Int = p.size): Pair<Int?, Int?>? {
             if (n < 7 || p[0] != 0x04.toByte() || p[2] != 0x04.toByte() || p[4] != 0x04.toByte() || p[5] != 0.toByte()) return null
+            var l: Int? = null; var r: Int? = null
             var off = 7
             repeat(p[6].toInt() and 0xFF) {
-                if (off + 4 > n) return null
-                when (p[off].toInt() and 0xFF) { 2 -> return true; 4 -> return false }
+                if (off + 4 > n) return@repeat
+                val st = p[off + 3].toInt() and 0xFF
+                when (p[off].toInt() and 0xFF) { 2 -> l = st; 4 -> r = st }
                 off += 5
             }
-            return null
+            return l to r
         }
     }
 }

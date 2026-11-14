@@ -37,15 +37,47 @@ class EarLogicTest {
     }
 
     // ---- left / right
-    @Test fun primaryFromBatteryOrder() {
-        // left listed first: the left bud is primary
-        assertEquals(true, SideTracker.primaryFromBattery(hex("04 00 04 00 04 00 03 02 01 50 01 01 04 01 46 02 01 08 01 1E 04 01")))
-        // right first
-        assertEquals(false, SideTracker.primaryFromBattery(hex("04 00 04 00 04 00 03 04 01 46 01 01 02 01 50 01 01 08 01 1E 04 01")))
-        // the case first, then a bud: the first *bud* decides
-        assertEquals(false, SideTracker.primaryFromBattery(hex("04 00 04 00 04 00 02 08 01 1E 01 01 04 01 46 01 01")))
-        assertNull(SideTracker.primaryFromBattery(hex("04 00 04 00 04 00 01 08 01 1E 01 01")))
-        assertNull(SideTracker.primaryFromBattery(hex("04 00 04 00 06 00 00 02")))
+    @Test fun budStatusFromBattery() {
+        // L 80% charging, R 70% discharging, case 30% discharging
+        assertEquals(2 to 1, SideTracker.budStatus(hex("04 00 04 00 04 00 03 02 01 50 02 01 04 01 46 01 01 08 01 1E 01 01")))
+        assertEquals(null to 4, SideTracker.budStatus(hex("04 00 04 00 04 00 02 08 01 1E 01 01 04 01 46 04 01")))
+        assertNull(SideTracker.budStatus(hex("04 00 04 00 06 00 00 02")))
+    }
+
+    /** Seen live on AirPods Pro 2: right bud in the ear, left in the case. The battery report lists L, R, Case
+     *  (so its order is not "primary first"); the ear report is (in ear, in case). Must read right in ear. */
+    @Test fun realCaseRightInEarLeftInCase() {
+        val s = SideTracker()
+        // the order the phone got them in when the link opened: battery first, then the ear report
+        val (l, r) = SideTracker.budStatus(hex("04 00 04 00 04 00 03 02 01 64 02 01 04 01 50 01 01 08 01 3C 01 01"))!!
+        s.onBattery(l, r, 1000)
+        val ear = EarReport.decode(hex("04 00 04 00 06 00 00 02"))!!
+        s.onEar(ear, 1012)
+        assertEquals(false, s.primaryIsLeft)
+        assertEquals("battery report", s.source)
+        assertEquals("Left: in case, Right: in ear", EarText.describe(ear, s.primaryIsLeft))
+        // and the other order (ear first, then battery) gives the same
+        val t = SideTracker()
+        t.onEar(ear, 1000); t.onBattery(l, r, 1100)
+        assertEquals(false, t.primaryIsLeft)
+        // the mirror case: left in ear, right in the case (right charging)
+        val u = SideTracker()
+        u.onEar(ear, 0); u.onBattery(1, 2, 10)
+        assertEquals(true, u.primaryIsLeft)
+        assertEquals("Left: in ear, Right: in case", EarText.describe(ear, u.primaryIsLeft))
+    }
+
+    @Test fun batteryCantTellWithoutExactlyOneInCase() {
+        val s = SideTracker()
+        s.onEar(EarReport(Bud.IN_EAR, Bud.OUT), 0); s.onBattery(1, 1, 10)
+        assertNull(s.primaryIsLeft)
+        s.onEar(EarReport(Bud.IN_CASE, Bud.IN_CASE), 20); s.onBattery(2, 2, 30)
+        assertNull(s.primaryIsLeft)
+        // a stale battery report (older than FRESH_MS before the ear report) is not used
+        val t = SideTracker()
+        t.onBattery(2, 1, 0)
+        t.onEar(EarReport(Bud.IN_EAR, Bud.IN_CASE), SideTracker.FRESH_MS + 1)
+        assertNull(t.primaryIsLeft)
     }
 
     @Test fun mapsPrimaryToSides() {
@@ -65,26 +97,24 @@ class EarLogicTest {
         assertNull(s.primaryIsLeft)
         s.onAdvert(false)
         assertEquals(false, s.primaryIsLeft); assertEquals("Bluetooth advert", s.source)
-        s.onBattery(true)
-        assertEquals(true, s.primaryIsLeft); assertEquals("battery report", s.source)
-        s.onAdvert(false)                                  // the link's word wins over an advert
+        s.onAdvert(true)                                   // a newer observation replaces it
         assertEquals(true, s.primaryIsLeft)
         // left (primary) taken out: (out, in), then the roles swap and the report comes again as (in, out)
         s.onEar(ears(IN, IN), 0)
         s.onEar(ears(OUT, IN), 10_000)
         s.onEar(ears(IN, OUT), 10_300)
         assertEquals(false, s.primaryIsLeft)               // the right bud is primary now
+        assertEquals("role swap", s.source)
         assertEquals("Left: out of ear, Right: in ear", EarText.describe(ears(IN, OUT), s.primaryIsLeft))
-        // a battery report between the two means it already said who is primary: no extra flip
-        s.onBattery(true)
+        // an advert between the two already said who is primary: no extra flip
         s.onEar(ears(OUT, IN), 20_000)
-        s.onBattery(false)
+        s.onAdvert(true)
         s.onEar(ears(IN, OUT), 20_200)
-        assertEquals(false, s.primaryIsLeft)
+        assertEquals(true, s.primaryIsLeft)
         // an exchange long apart is two real changes, not a swap
         s.onEar(ears(OUT, IN), 30_000)
         s.onEar(ears(IN, OUT), 40_000)
-        assertEquals(false, s.primaryIsLeft)
+        assertEquals(true, s.primaryIsLeft)
         s.reset()
         assertNull(s.primaryIsLeft)
     }

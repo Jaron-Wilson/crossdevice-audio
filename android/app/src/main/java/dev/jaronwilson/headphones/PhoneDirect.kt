@@ -77,7 +77,7 @@ object PhoneDirect {
         return ctor.newInstance(*args.toTypedArray()) as BluetoothSocket
     }
 
-    private val NOTIFY = hex("040004000F00FFFFFEFF")
+    private val NOTIFY = hex("040004000F00FFFFFFFF")   // all on (LibrePods Android, panel.py); FFFFFEFF brought no battery report
 
     /** The opening sequence on a fresh AAP link: handshake, features, notifications on (and, once, the IRK
      *  request for Last seen). [AapLink] sends it; its reader is already running, so the reply burst is seen. */
@@ -94,10 +94,7 @@ object PhoneDirect {
         // Last seen / finder: the battery packet and the IRK reply (see Tracker)
         AapTrack.batteryFrom(buf, n)?.let { Tracker.rememberBattery(context, Tracker.AIRPODS, it) }
         if (n >= 7 && buf[4] == 0x04.toByte() && buf[5] == 0.toByte() && buf[0] == 0x04.toByte() && buf[2] == 0x04.toByte())
-            android.util.Log.d("Ears", "battery report, component order: " + (0 until (buf[6].toInt() and 0xFF))
-                .mapNotNull { i -> (7 + 5 * i).takeIf { it < n }?.let { buf[it].toInt() and 0xFF } }
-                .joinToString(",") { when (it) { 2 -> "L"; 4 -> "R"; 8 -> "Case"; else -> "%02x".format(it) } })
-        SideTracker.primaryFromBattery(buf, n)?.let { Ears.onBattery(context, it) }
+            Ears.onBatteryPacket(context, buf.copyOf(n))
         AapTrack.irkFrom(buf, n)?.let { Tracker.rememberIrk(context, it) }
         EarReport.decode(buf, n)?.let { Ears.onRaw(context, it) }
         if (n >= 8 && buf[0] == 0x04.toByte() && buf[1] == 0.toByte() && buf[2] == 0x04.toByte() &&
@@ -135,6 +132,9 @@ object PhoneDirect {
         val (a, b) = s.split(",").map { it.toInt() }
         return (a to b) to prefs(context).getLong("ear_t", 0)
     }
+
+    fun setEarPrimaryLeft(context: Context, primaryIsLeft: Boolean?) =
+        prefs(context).edit().putInt("ear_pl", when (primaryIsLeft) { true -> 1; false -> 0; null -> -1 }).apply()
 
     /** Whether the primary was the left bud when the last ear report came (null: not known). */
     fun earPrimaryLeft(context: Context): Boolean? = when (prefs(context).getInt("ear_pl", -1)) { 1 -> true; 0 -> false; else -> null }

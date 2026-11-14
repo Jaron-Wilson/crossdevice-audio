@@ -325,8 +325,8 @@ thread feeds the Packets log and every user of the link. It costs almost nothing
 sleeps until the AirPods send something.
 
 Left or right: the report is ordered primary bud first, not left first. The app learns which bud is the primary
-from the AAP battery report (it lists the primary first) or, until one arrives, from the BLE advert's "primary
-is left" bit; details in [PROTOCOL.md](docs/PROTOCOL.md#ear-detection-left-and-right-android-190). Until it knows, it says
+from the AAP battery report (the bud that is charging is the one in the case) or from the BLE advert's
+"primary is left" bit; details in [PROTOCOL.md](docs/PROTOCOL.md#ear-detection-left-and-right-android-190). Until it knows, it says
 "One bud in ear, the other in case".
 
 ## Repository layout

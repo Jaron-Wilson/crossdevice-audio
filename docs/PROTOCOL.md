@@ -136,18 +136,24 @@ noise per side, ANC gains), but Skull-iQ never calls it, and it would go over Ai
 The `0x06` report is ordered **primary bud first**, not left first. The primary is the bud that holds the link to
 the phone (and the microphone); when it leaves the ear the AirPods hand that role to the other bud and send the
 report again with the pair exchanged (LibrePods, "AAP Definitions"). So `00 02` means "one bud in ear, the other
-in the case", and which one is left needs a second source. The app uses, in this order:
+in the case", and which one is left needs a second source. The newest of these observations wins:
 
-1. **The AAP battery report** (`0x04`, above). It lists the primary bud first: type `02` (left) before `04`
-   (right) means the left bud is primary. This is how LibrePods' Linux app finds the primary (`battery.hpp`,
-   "first pod is primary", used by `deviceinfo.hpp` for left/right in-ear). It comes on the same link as the ear
-   report, so it is the most direct source. Chosen first for that reason. The AirPods send it "occasionally"
-   (on battery and bud changes), not always right after the link opens.
-2. **The BLE proximity advert**, status bit 5 ("left bud is primary", LibrePods and OpenPods), when one of the
-   app's short scans heard *your* AirPods (matched by IRK or model and battery) in the last 10 minutes. Used only
-   until a battery report arrives on the link.
-3. **Role swap inference**: a report `(a, b)` followed within 2 s by `(b, a)`, with no battery report in between,
-   is the primary hand-off, so the known side flips with it.
+1. **The AAP battery report** (`0x04`, above), but not its order: LibrePods' Linux app takes the first bud listed
+   as the primary (`battery.hpp`), and on AirPods Pro 2 that is wrong. Checked live with the right bud in the ear
+   and the left in the case: the report listed L, R, Case while the ear report was `00 02` (primary in ear), so
+   the primary was the right bud, listed second. 1.9.0 used the order and showed the sides reversed. What the
+   battery report does tell reliably is which bud is **charging** (status `02`) or off the link (`04`): a bud in
+   the case. When the ear report has exactly one bud in the case and the battery report exactly one bud charging
+   or off the link, that is the same bud, which says whether the primary is left or right. The battery report
+   must be no older than 5 s before the ear report. With the notification mask `FF FF FF FF` the battery report
+   comes right after the link opens (with `FF FF FE FF`, as 1.9.0 sent, none came in minutes); LibrePods' Android
+   app and the laptop panel send `FF FF FF FF` too.
+2. **The BLE proximity advert**, status bit 5 ("left bud is primary", LibrePods' Linux `blemanager.cpp`), from a
+   short scan (up to 6 s, stopped at the first advert from these AirPods) when the link opens and when the ears
+   change, at most every 30 s. Not yet confirmed on a real advert: on this phone, with the screen off, the scan
+   heard no advert at all.
+3. **Role swap inference**: a report `(a, b)` followed within 2 s by `(b, a)`, with no other observation in
+   between, is the primary hand-off, so the known side flips with it.
 
 If none of these is known yet, the app says "One bud in ear, the other in case (which is left isn't known yet)"
 instead of guessing. The pause and listening rules don't need the sides: they count buds in an ear.

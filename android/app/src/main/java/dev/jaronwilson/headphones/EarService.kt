@@ -69,19 +69,24 @@ object Ears {
         PhoneDirect.rememberEar(c, r.primary.code to r.secondary.code, pl)
     }
 
-    /** A battery report on the link said which bud is primary. */
-    fun onBattery(c: Context, primaryLeft: Boolean) {
-        val changed = synchronized(side) {
-            val was = side.primaryIsLeft
-            side.onBattery(primaryLeft)
-            was != primaryLeft
+    /** A battery report (levels and charging states only: nothing personal in it). */
+    fun onBatteryPacket(c: Context, p: ByteArray) {
+        Log.d(TAG, "battery packet: " + p.joinToString(" ") { "%02x".format(it) })
+        val (l, r) = SideTracker.budStatus(p) ?: return
+        val (was, pl) = synchronized(side) {
+            val w = side.primaryIsLeft
+            side.onBattery(l, r, System.currentTimeMillis())
+            w to side.primaryIsLeft
         }
-        if (!changed) return
-        Log.d(TAG, "primary is ${if (primaryLeft) "left" else "right"} (battery report order)")
-        // re-label the last report with the sides it really had
+        if (pl != was) relabel(c, pl, "battery report")
+    }
+
+    /** The side changed: re-label the last report with it and tell the screens. */
+    private fun relabel(c: Context, pl: Boolean?, why: String) {
+        Log.d(TAG, "primary is ${when (pl) { true -> "left"; false -> "right"; null -> "not known" }} ($why)")
         PhoneDirect.ear(c)?.let { (pair, _) ->
-            c.getSharedPreferences("direct", Context.MODE_PRIVATE).edit().putInt("ear_pl", if (primaryLeft) 1 else 0).apply()
-            Log.d(TAG, "now: ${PhoneDirect.earText(pair, primaryLeft)}")
+            PhoneDirect.setEarPrimaryLeft(c, pl)
+            Log.d(TAG, "now: ${PhoneDirect.earText(pair, pl)}")
         }
         changed()
     }
@@ -93,6 +98,68 @@ object Ears {
     }
 
     fun onLinkClosed() = synchronized(side) { side.reset() }
+
+    /** Which bud is primary, as far as the app knows now, and from what. */
+    fun sideKnown(): Pair<Boolean?, String> = synchronized(side) { side.primaryIsLeft to side.source }
+
+    @Volatile private var scanning = false
+    @Volatile private var lastScan = 0L
+
+    /**
+     * Ask the AirPods' own BLE broadcast which bud is primary, for when the battery report can't tell (no bud,
+     * or both, in the case). One short scan
+     * (up to [SCAN_MS], stopped at the first advert from these AirPods), at most once every [SCAN_GAP_MS]
+     * unless [force]d. Runs on its own thread.
+     */
+    @android.annotation.SuppressLint("MissingPermission")
+    fun findSide(c: Context, why: String, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (scanning || (!force && now - lastScan < SCAN_GAP_MS)) return
+        if (c.checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        val scanner = c.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter?.bluetoothLeScanner ?: return
+        scanning = true; lastScan = now
+        Thread {
+            val hit = java.util.concurrent.CountDownLatch(1)
+            var found: ProxAdvert? = null
+            val cb = object : android.bluetooth.le.ScanCallback() {
+                override fun onScanResult(type: Int, r: android.bluetooth.le.ScanResult) {
+                    if (found != null) return
+                    val ad = ProxAdvert.parse(r.scanRecord?.getManufacturerSpecificData(0x004C)) ?: return
+                    val m = runCatching { Tracker.onAdvert(c, r.device.address, r.rssi, ad, learnIt = Handoff.local(c) && r.rssi > -70) }
+                        .getOrDefault(MatchLevel.NO)
+                    // yours by key or by model + battery; or, while yours are connected here, one right next to the phone
+                    val mine = m == MatchLevel.EXACT || m == MatchLevel.LIKELY || (Handoff.local(c) && r.rssi > -60 &&
+                        Tracker.identity(c).model.let { it == null || it == ad.model })
+                    Log.d(TAG, "advert: status %02x primaryLeft=%s thisInCase=%s rssi %d match %s -> %s".format(
+                        ad.status, ad.primaryLeft, ad.thisInCase, r.rssi, m, if (mine) "used" else "skipped") +
+                        " (advert says: ${ad.budsText()})")
+                    if (mine) { found = ad; hit.countDown() }
+                }
+            }
+            val filter = android.bluetooth.le.ScanFilter.Builder()
+                .setManufacturerData(0x004C, byteArrayOf(0x07), byteArrayOf(0xFF.toByte())).build()
+            val settings = android.bluetooth.le.ScanSettings.Builder()
+                .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+            try {
+                scanner.startScan(listOf(filter), settings, cb)
+                hit.await(SCAN_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (e: Throwable) {
+                Log.w(TAG, "scan failed: ${e.message}")
+            } finally {
+                runCatching { scanner.stopScan(cb) }
+                scanning = false
+            }
+            val ad = found
+            if (ad == null) { Log.d(TAG, "no advert from these AirPods in ${SCAN_MS / 1000} s ($why)"); return@Thread }
+            onAdvert(c, ad.primaryLeft)
+            val pl = synchronized(side) { side.primaryIsLeft }
+            Log.d(TAG, "side from the advert ($why): primary is ${if (ad.primaryLeft) "left" else "right"}; using ${sideKnown()}")
+            relabel(c, pl, "advert")
+        }.start()
+    }
+
+    private const val SCAN_MS = 6_000L
+    private const val SCAN_GAP_MS = 30_000L
 
     /** Just the words ("Left: in ear, Right: in case") while the link is live, else "" (for the widget). */
     fun liveText(c: Context): String {
@@ -179,6 +246,7 @@ class EarService : Service() {
                 if (r.isSuccess) {
                     linked = true; tries = 0
                     Log.d(TAG, "holding the AAP link for ear detection")
+                    Ears.findSide(applicationContext, "link opened", force = true)
                     startFg(Ears.text(this).ifEmpty { "Waiting for the AirPods' report" })
                 } else {
                     Log.w(TAG, "couldn't open the AAP link: ${r.exceptionOrNull()?.message}")
@@ -216,6 +284,8 @@ class EarService : Service() {
     private fun settle() {
         val r = debounce.settle(System.currentTimeMillis()) ?: return
         act(r)
+        // left/right: look it up from the AirPods' broadcast unless the link itself said (battery report)
+        if (Ears.sideKnown().second != "battery report") Ears.findSide(applicationContext, "ear change")
         startFg(Ears.text(this))
         Ears.changed()
         runCatching { HeadphonesWidget.redraw(this) }
