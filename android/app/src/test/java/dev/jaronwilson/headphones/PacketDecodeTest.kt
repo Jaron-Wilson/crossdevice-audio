@@ -31,7 +31,8 @@ class PacketDecodeTest {
 
     @Test fun batteryAndEars() {
         val bat = hex("04000400040003" + "0201500101" + "02014B0101".replace("0201", "0401") + "0801280201")
-        assertEquals("Battery: L 80% · R 75% · Case 40%+", PacketDecode.aap(bat, false).meaning)
+        // type 02 is the right bud, 04 the left; state 01 charging, 02 discharging
+        assertEquals("Battery: L 75%+ · R 80%+ · Case 40%", PacketDecode.aap(bat, false).meaning)
         assertEquals("Ear detection: both in ear", PacketDecode.aap(hex("0400040006000000"), false).meaning)
         assertEquals("Ear detection: primary bud in ear, secondary in case", PacketDecode.aap(hex("0400040006000002"), false).meaning)
     }

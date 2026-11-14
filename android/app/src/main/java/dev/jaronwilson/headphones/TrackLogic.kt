@@ -275,22 +275,32 @@ object AapTrack {
         return null
     }
 
-    /** Battery packet 04 00 04 00 04 00 <count> then <type> 01 <level> <status> 01 per component
-     *  (type 2 left, 4 right, 8 case; status 1 discharging, 2 charging, 4 disconnected). Returns
-     *  ("L 80% · R 70%", ...) or null. */
+    /** AAP battery component types (LibrePods `battery.hpp`): 2 is the RIGHT bud, 4 the LEFT, 8 the case,
+     *  1 a single-unit headset. Not the other way round: 1.9.1 and earlier had left and right swapped. */
+    const val TYPE_RIGHT = 2
+    const val TYPE_LEFT = 4
+    const val TYPE_CASE = 8
+    /** Component states: 1 charging, 2 discharging, 4 disconnected (0 unknown). */
+    const val CHARGING = 1
+    const val DISCHARGING = 2
+    const val DISCONNECTED = 4
+
+    /** Battery packet 04 00 04 00 04 00 <count> then <type> 01 <level> <status> 01 per component (types and
+     *  states above). Returns "L 93% · R 91% · Case 40%+" (always left, right, case; + = charging) or null. */
     fun batteryFrom(p: ByteArray, n: Int = p.size): String? {
         if (n < 7 || p[0] != 0x04.toByte() || p[2] != 0x04.toByte() || p[4] != 0x04.toByte() || p[5] != 0.toByte()) return null
-        val names = mapOf(2 to "L", 4 to "R", 8 to "Case")
-        val out = mutableListOf<String>()
+        val found = HashMap<Int, String>()
         var off = 7
         repeat(p[6].toInt() and 0xFF) {
             if (off + 4 > n) return@repeat
-            val name = names[p[off].toInt() and 0xFF]
+            val type = p[off].toInt() and 0xFF
             val level = p[off + 2].toInt() and 0xFF
             val st = p[off + 3].toInt() and 0xFF
-            if (name != null && st != 4 && level in 0..100) out += "$name $level%" + if (st == 2) "+" else ""
+            if (st != DISCONNECTED && level in 0..100) found[type] = "$level%" + if (st == CHARGING) "+" else ""
             off += 5
         }
+        val out = listOf(TYPE_LEFT to "L", TYPE_RIGHT to "R", TYPE_CASE to "Case", 1 to "").mapNotNull { (t, name) ->
+            found[t]?.let { if (name.isEmpty()) it else "$name $it" } }
         return out.takeIf { it.isNotEmpty() }?.joinToString(" · ")
     }
 }

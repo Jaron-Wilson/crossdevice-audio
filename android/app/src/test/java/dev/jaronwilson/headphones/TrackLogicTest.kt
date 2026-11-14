@@ -201,7 +201,7 @@ class TrackLogicTest {
 
     @Test fun batteryFromAap() {
         val pkt = hex("04 00 04 00 04 00 03 02 01 50 01 01 04 01 46 02 01 08 01 1E 04 01")
-        assertEquals("L 80% · R 70%+", AapTrack.batteryFrom(pkt))
+        assertEquals("L 70% · R 80%+", AapTrack.batteryFrom(pkt))   // 02 = right (charging), 04 = left
         assertNotNull(AapTrack.batteryFrom(pkt, pkt.size))
         assertNull(AapTrack.batteryFrom(hex("04 00 04 00 09 00 0D 02")))
     }

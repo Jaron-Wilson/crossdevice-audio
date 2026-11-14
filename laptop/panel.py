@@ -207,7 +207,8 @@ def ap_decode(kind, data):
     if kind == "bool": return {1: True, 2: False}.get(v)
     if kind == "level": return v
     return [m for m, bit in MASK_BITS.items() if v & bit]
-BT={2:"left",4:"right",8:"case"}; BS={1:"discharging",2:"charging",4:"disconnected"}
+# AAP battery component types and states (LibrePods battery.hpp): 2 is the RIGHT bud, 4 the LEFT; 1 charging, 2 discharging
+BT={2:"right",4:"left",8:"case",1:"single"}; BS={0:"unknown",1:"charging",2:"discharging",4:"disconnected"}
 # ---- AirPods battery from their BLE "proximity pairing" broadcast (Apple 0x004C, type 0x07).
 # Works whichever host is playing: the AAP battery reports only reach the active host.
 BLE = {"battery": {}, "t": 0.0}

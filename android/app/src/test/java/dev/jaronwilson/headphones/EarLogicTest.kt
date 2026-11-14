@@ -37,45 +37,67 @@ class EarLogicTest {
     }
 
     // ---- left / right
-    @Test fun budStatusFromBattery() {
-        // L 80% charging, R 70% discharging, case 30% discharging
-        assertEquals(2 to 1, SideTracker.budStatus(hex("04 00 04 00 04 00 03 02 01 50 02 01 04 01 46 01 01 08 01 1E 01 01")))
-        assertEquals(null to 4, SideTracker.budStatus(hex("04 00 04 00 04 00 02 08 01 1E 01 01 04 01 46 04 01")))
-        assertNull(SideTracker.budStatus(hex("04 00 04 00 06 00 00 02")))
+    /** A real report from AirPods Pro 2, both buds in the ears, the case away: type 02 is the RIGHT bud (91%),
+     *  04 the LEFT (93%), both state 02 = discharging; the case 04 = disconnected. */
+    private val realBothInEar = hex("04 00 04 00 04 00 03 02 01 5B 02 01 04 01 5D 02 01 08 01 00 04 01")
+
+    @Test fun budPowerByTypeNotOrder() {
+        assertEquals(BudPower(left = 2, right = 2, firstIsLeft = false), BudPower.from(realBothInEar))
+        assertEquals("L 93% · R 91%", AapTrack.batteryFrom(realBothInEar))
+        // left listed first, charging (in the case); right discharging
+        assertEquals(BudPower(1, 2, true), BudPower.from(hex("04 00 04 00 04 00 02 04 01 50 01 01 02 01 46 02 01")))
+        assertEquals("L 80%+ · R 70%", AapTrack.batteryFrom(hex("04 00 04 00 04 00 02 04 01 50 01 01 02 01 46 02 01")))
+        assertNull(BudPower.from(hex("04 00 04 00 06 00 00 02")))
     }
 
-    /** Seen live on AirPods Pro 2: right bud in the ear, left in the case. The battery report lists L, R, Case
-     *  (so its order is not "primary first"); the ear report is (in ear, in case). Must read right in ear. */
+    /** Seen live: right bud in the ear, left in the case. The ear report is (in ear, in case); the battery
+     *  report lists 02 (right) first. With the left bud charging in the case, it must read right in ear. */
     @Test fun realCaseRightInEarLeftInCase() {
-        val s = SideTracker()
-        // the order the phone got them in when the link opened: battery first, then the ear report
-        val (l, r) = SideTracker.budStatus(hex("04 00 04 00 04 00 03 02 01 64 02 01 04 01 50 01 01 08 01 3C 01 01"))!!
-        s.onBattery(l, r, 1000)
         val ear = EarReport.decode(hex("04 00 04 00 06 00 00 02"))!!
-        s.onEar(ear, 1012)
+        val bat = BudPower.from(hex("04 00 04 00 04 00 03 02 01 5B 02 01 04 01 5D 01 01 08 01 3C 02 01"))!!
+        assertEquals(BudPower(left = 1, right = 2, firstIsLeft = false), bat)
+        // battery first, then the ear report (the order the phone got them in when the link opened)
+        val s = SideTracker()
+        s.onBattery(bat, 1000); s.onEar(ear, 1012)
         assertEquals(false, s.primaryIsLeft)
-        assertEquals("battery report", s.source)
+        assertEquals("battery charging", s.source)
         assertEquals("Left: in case, Right: in ear", EarText.describe(ear, s.primaryIsLeft))
-        // and the other order (ear first, then battery) gives the same
+        // ear first, then battery
         val t = SideTracker()
-        t.onEar(ear, 1000); t.onBattery(l, r, 1100)
+        t.onEar(ear, 1000); t.onBattery(bat, 1100)
         assertEquals(false, t.primaryIsLeft)
-        // the mirror case: left in ear, right in the case (right charging)
+        // a left bud in a closed case can be off the link (4) instead of charging: same answer
         val u = SideTracker()
-        u.onEar(ear, 0); u.onBattery(1, 2, 10)
-        assertEquals(true, u.primaryIsLeft)
-        assertEquals("Left: in ear, Right: in case", EarText.describe(ear, u.primaryIsLeft))
+        u.onEar(ear, 0); u.onBattery(BudPower(4, 2, false), 10)
+        assertEquals(false, u.primaryIsLeft)
+        // the mirror: left in the ear, right charging in the case
+        val v = SideTracker()
+        v.onEar(ear, 0); v.onBattery(BudPower(2, 1, true), 10)
+        assertEquals(true, v.primaryIsLeft)
+        assertEquals("Left: in ear, Right: in case", EarText.describe(ear, v.primaryIsLeft))
     }
 
-    @Test fun batteryCantTellWithoutExactlyOneInCase() {
+    @Test fun batteryOrderOnlyWhenNothingElseSaid() {
+        // both in ear (the real packet): charging can't tell, the order (right first) is the fallback
         val s = SideTracker()
-        s.onEar(EarReport(Bud.IN_EAR, Bud.OUT), 0); s.onBattery(1, 1, 10)
-        assertNull(s.primaryIsLeft)
-        s.onEar(EarReport(Bud.IN_CASE, Bud.IN_CASE), 20); s.onBattery(2, 2, 30)
-        assertNull(s.primaryIsLeft)
-        // a stale battery report (older than FRESH_MS before the ear report) is not used
+        s.onEar(EarReport(Bud.IN_EAR, Bud.IN_EAR), 0); s.onBattery(BudPower.from(realBothInEar)!!, 10)
+        assertEquals(false, s.primaryIsLeft); assertEquals("battery order", s.source)
+        // an advert said otherwise: the order doesn't overrule it
         val t = SideTracker()
-        t.onBattery(2, 1, 0)
+        t.onAdvert(true); t.onEar(EarReport(Bud.IN_EAR, Bud.OUT), 0); t.onBattery(BudPower.from(realBothInEar)!!, 10)
+        assertEquals(true, t.primaryIsLeft)
+        // but the charging states do (one bud in the case)
+        t.onEar(EarReport(Bud.IN_EAR, Bud.IN_CASE), 20); t.onBattery(BudPower(1, 2, false), 30)
+        assertEquals(false, t.primaryIsLeft)
+    }
+
+    @Test fun chargingCantTellWithoutExactlyOneInCase() {
+        val s = SideTracker()
+        s.onEar(EarReport(Bud.IN_CASE, Bud.IN_CASE), 0); s.onBattery(BudPower(1, 1, null), 10)
+        assertNull(s.primaryIsLeft)
+        // a stale battery report (older than FRESH_MS before the ear report) is not used for charging
+        val t = SideTracker()
+        t.onBattery(BudPower(1, 2, null), 0)
         t.onEar(EarReport(Bud.IN_EAR, Bud.IN_CASE), SideTracker.FRESH_MS + 1)
         assertNull(t.primaryIsLeft)
     }

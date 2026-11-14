@@ -72,13 +72,15 @@ object Ears {
     /** A battery report (levels and charging states only: nothing personal in it). */
     fun onBatteryPacket(c: Context, p: ByteArray) {
         Log.d(TAG, "battery packet: " + p.joinToString(" ") { "%02x".format(it) })
-        val (l, r) = SideTracker.budStatus(p) ?: return
+        val bp = BudPower.from(p) ?: return
         val (was, pl) = synchronized(side) {
             val w = side.primaryIsLeft
-            side.onBattery(l, r, System.currentTimeMillis())
+            side.onBattery(bp, System.currentTimeMillis())
             w to side.primaryIsLeft
         }
-        if (pl != was) relabel(c, pl, "battery report")
+        Log.d(TAG, "battery: left state ${bp.left}, right state ${bp.right}, listed first: " +
+            when (bp.firstIsLeft) { true -> "left"; false -> "right"; null -> "-" } + "; side ${sideKnown()}")
+        if (pl != was) relabel(c, pl, sideKnown().second)
     }
 
     /** The side changed: re-label the last report with it and tell the screens. */
@@ -285,7 +287,7 @@ class EarService : Service() {
         val r = debounce.settle(System.currentTimeMillis()) ?: return
         act(r)
         // left/right: look it up from the AirPods' broadcast unless the link itself said (battery report)
-        if (Ears.sideKnown().second != "battery report") Ears.findSide(applicationContext, "ear change")
+        if (Ears.sideKnown().second != "battery charging") Ears.findSide(applicationContext, "ear change")
         startFg(Ears.text(this))
         Ears.changed()
         runCatching { HeadphonesWidget.redraw(this) }

@@ -43,35 +43,57 @@ data class EarReport(val primary: Bud, val secondary: Bud) {
     }
 }
 
+/** Per-bud state from an AAP battery report ([AapTrack] types and states), and which bud it listed first. */
+data class BudPower(val left: Int?, val right: Int?, val firstIsLeft: Boolean?) {
+    companion object {
+        /** From an AAP battery report, or null if [p] isn't one. */
+        fun from(p: ByteArray, n: Int = p.size): BudPower? {
+            if (n < 7 || p[0] != 0x04.toByte() || p[2] != 0x04.toByte() || p[4] != 0x04.toByte() || p[5] != 0.toByte()) return null
+            var l: Int? = null; var r: Int? = null; var first: Boolean? = null
+            var off = 7
+            repeat(p[6].toInt() and 0xFF) {
+                if (off + 4 > n) return@repeat
+                val st = p[off + 3].toInt() and 0xFF
+                when (p[off].toInt() and 0xFF) {
+                    AapTrack.TYPE_LEFT -> { l = st; if (first == null) first = true }
+                    AapTrack.TYPE_RIGHT -> { r = st; if (first == null) first = false }
+                }
+                off += 5
+            }
+            return BudPower(l, r, first)
+        }
+    }
+}
+
 /**
  * Which bud is the primary: left or right. The ear report only says "primary" and "secondary"; the primary is
- * the bud holding the link, and it moves. Sources, the newest observation winning:
- *  1. **The AAP battery report** (`04 00 04 00 04 00 <count> [<type> 01 <level> <status> 01]...`, type 2 left,
- *     4 right, 8 case; status 1 discharging, 2 charging, 4 not connected). Its order is NOT the primary: on
- *     AirPods Pro 2 it was L, R, Case with the right bud primary (checked live). But it says which bud is
- *     charging, and a bud in the case charges (or drops off the link): when the ear report has exactly one bud
- *     in the case and the battery report exactly one bud charging or not connected, that bud is the one in
- *     the case, which tells primary from secondary. Used only when the battery report is no older than
- *     [FRESH_MS] before the ear report, so a stale one can't mislabel a later change.
- *  2. **The BLE proximity advert**'s status bit 5 ("left bud is primary", LibrePods Linux `blemanager.cpp`),
- *     when a scan hears *your* AirPods.
- *  3. **Role swap**: the AirPods hand the primary role over when the primary leaves the ear and re-send the
+ * the bud holding the link, and it moves. Sources:
+ *  1. **The AAP battery report's charging states** (types 2 right, 4 left; states 1 charging, 2 discharging,
+ *     4 disconnected, LibrePods `battery.hpp`). A bud in the case is charging or off the link; a bud out of it
+ *     discharges. When the ear report has exactly one bud in the case and the battery report exactly one bud
+ *     charging or disconnected, that is the same bud, which says whether the primary is left or right. Used
+ *     only when the battery report is no older than [FRESH_MS] before the ear report.
+ *  2. **The BLE proximity advert**'s status bit 5 ("left bud is primary", LibrePods Linux `blemanager.cpp`).
+ *  3. **The battery report's order**: LibrePods' Linux app takes the first bud listed as the primary. Used only
+ *     while nothing else has said (it agreed with source 1 in the one live check, right bud primary and listed
+ *     first, but that alone can't tell it from a fixed right-then-left order).
+ *  4. **Role swap**: the AirPods hand the primary role over when the primary leaves the ear and re-send the
  *     report with the pair exchanged; `(a, b)` then `(b, a)` within [SWAP_MS] flips the known side.
  * If none of these is known, [primaryIsLeft] is null and the text says "one bud / the other bud".
  */
 class SideTracker {
     var primaryIsLeft: Boolean? = null; private set
-    /** "battery report", "Bluetooth advert", "role swap" or "" */
+    /** "battery charging", "Bluetooth advert", "battery order", "role swap" or "" */
     var source = ""; private set
     private var lastEar: EarReport? = null
     private var lastEarT = -1L
-    private var power: Pair<Int?, Int?>? = null
+    private var power: BudPower? = null
     private var powerT = -1L
     private var setSinceEar = false
 
-    /** A battery report at [t]: each bud's status (1 discharging, 2 charging, 4 not connected; null if absent). */
-    fun onBattery(left: Int?, right: Int?, t: Long) {
-        power = left to right; powerT = t
+    /** A battery report at [t]. */
+    fun onBattery(p: BudPower, t: Long) {
+        power = p; powerT = t
         infer()
     }
 
@@ -91,19 +113,19 @@ class SideTracker {
         infer()
     }
 
-    /** One bud in the case by the ear report, and one bud charging (or off the link) by the battery report. */
     private fun infer() {
-        val r = lastEar ?: return
-        val (l, rt) = power ?: return
-        if (powerT < lastEarT - FRESH_MS) return
-        val inCase = listOf(r.primary, r.secondary).count { it == Bud.IN_CASE }
-        if (inCase != 1) return
-        val lCase = l == 2 || l == 4
-        val rCase = rt == 2 || rt == 4
-        if (lCase == rCase) return
-        // the bud in the case is the left one iff lCase; the primary is that bud iff the primary is in the case
-        val pl = (r.primary == Bud.IN_CASE) == lCase
-        primaryIsLeft = pl; source = "battery report"; setSinceEar = true
+        val p = power ?: return
+        val r = lastEar
+        if (r != null && powerT >= lastEarT - FRESH_MS && listOf(r.primary, r.secondary).count { it == Bud.IN_CASE } == 1) {
+            val lCase = p.left == AapTrack.CHARGING || p.left == AapTrack.DISCONNECTED
+            val rCase = p.right == AapTrack.CHARGING || p.right == AapTrack.DISCONNECTED
+            if (lCase != rCase && p.left != null && p.right != null) {
+                // the bud in the case is the left one iff lCase; the primary is that bud iff the primary is in the case
+                primaryIsLeft = (r.primary == Bud.IN_CASE) == lCase; source = "battery charging"; setSinceEar = true
+                return
+            }
+        }
+        if (primaryIsLeft == null && p.firstIsLeft != null) { primaryIsLeft = p.firstIsLeft; source = "battery order" }
     }
 
     /** The link closed: what it said no longer holds. */
@@ -112,21 +134,6 @@ class SideTracker {
     companion object {
         const val SWAP_MS = 2000L
         const val FRESH_MS = 5000L
-
-        /** From an AAP battery report: (left status, right status), each null if the bud isn't listed; or
-         *  null if this isn't a battery report. */
-        fun budStatus(p: ByteArray, n: Int = p.size): Pair<Int?, Int?>? {
-            if (n < 7 || p[0] != 0x04.toByte() || p[2] != 0x04.toByte() || p[4] != 0x04.toByte() || p[5] != 0.toByte()) return null
-            var l: Int? = null; var r: Int? = null
-            var off = 7
-            repeat(p[6].toInt() and 0xFF) {
-                if (off + 4 > n) return@repeat
-                val st = p[off + 3].toInt() and 0xFF
-                when (p[off].toInt() and 0xFF) { 2 -> l = st; 4 -> r = st }
-                off += 5
-            }
-            return l to r
-        }
     }
 }
 
