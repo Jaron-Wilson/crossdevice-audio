@@ -96,7 +96,9 @@ object CrusherDirect {
             val out = sock.outputStream
             val input = sock.inputStream
             for (c in cmds) {
-                out.write((c + "\r").toByteArray()); out.flush()
+                val pkt = (c + "\r").toByteArray()
+                out.write(pkt); out.flush()
+                PacketLog.crusher(context, true, pkt)
                 Thread.sleep(350)
                 if (!read) continue
                 val sb = StringBuilder()
@@ -110,6 +112,7 @@ object CrusherDirect {
                     } else Thread.sleep(40)
                 }
                 replies += sb.toString()
+                PacketLog.crusher(context, false, sb.toString().toByteArray(Charsets.ISO_8859_1))
             }
         } finally {
             runCatching { sock.close() }
@@ -212,21 +215,29 @@ object CrusherDirect {
         if (!connected(context)) { extras = null; return null }
         val txt = runCatching { session(context, listOf("AT.UIAUDIO?", "AT.CRUSHER?"), read = true) }
             .getOrElse { return JSONObject().put("online", false) }
-        val anc = Regex("anc:\\s*(on|off)").find(txt)?.groupValues?.get(1) == "on"
-        val transparency = Regex("transparency:\\s*(on|off)").find(txt)?.groupValues?.get(1) == "on"
-        val lvl = Regex("level:\\s*(\\d+)\\s*/\\s*(\\d+)").find(txt)
-        val bassOn = Regex("(?i)state:\\s*(on|off)").find(txt)?.groupValues?.get(1)?.lowercase()
+        val r = parseState(txt)
         return JSONObject()
             .put("online", true)
-            .put("anc", anc)
-            .put("transparency", transparency)
+            .put("anc", r.anc == true)
+            .put("transparency", r.transparency == true)
             .put("extras", readExtras(context))
             .apply {
-                if (bassOn != null) put("bass_on", bassOn == "on")
-                if (lvl != null) {
-                    put("bass", lvl.groupValues[1].toInt())
-                    put("bass_max", lvl.groupValues[2].toInt())
+                r.bassOn?.let { put("bass_on", it) }
+                if (r.bass != null) {
+                    put("bass", r.bass)
+                    put("bass_max", r.bassMax)
                 }
             }
+    }
+
+    /** What a reply says; null for anything it doesn't mention. Pure, so the packet view and tests use it too. */
+    data class Reply(val anc: Boolean?, val transparency: Boolean?, val bass: Int?, val bassMax: Int?, val bassOn: Boolean?)
+
+    /** Parse `anc: on`, `transparency: off`, `level: 5 / 10` and `state: ON` out of AT.UIAUDIO? / AT.CRUSHER? replies. */
+    fun parseState(txt: String): Reply {
+        fun onOff(key: String) = Regex("(?i)$key:\\s*(on|off)").find(txt)?.groupValues?.get(1)?.lowercase()?.let { it == "on" }
+        val lvl = Regex("level:\\s*(\\d+)\\s*/\\s*(\\d+)").find(txt)
+        return Reply(onOff("anc"), onOff("transparency"), lvl?.groupValues?.get(1)?.toInt(),
+            lvl?.groupValues?.get(2)?.toInt(), onOff("state"))
     }
 }

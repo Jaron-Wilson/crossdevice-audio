@@ -88,11 +88,17 @@ object PhoneDirect {
         try {
             sock.connect()
             val out = sock.outputStream
-            out.write(HANDSHAKE); out.flush(); Thread.sleep(250)
-            out.write(FEATURES); out.flush(); Thread.sleep(150)
-            out.write(NOTIFY); out.flush()
+            write(context, out, HANDSHAKE); Thread.sleep(250)
+            write(context, out, FEATURES); Thread.sleep(150)
+            write(context, out, NOTIFY)
         } catch (e: Throwable) { runCatching { sock.close() }; throw e }
         return sock
+    }
+
+    /** Every AAP packet this app sends goes through here (and into the Packets screen's log). */
+    fun write(context: Context, out: java.io.OutputStream, pkt: ByteArray) {
+        out.write(pkt); out.flush()
+        PacketLog.aap(context, true, pkt)
     }
 
     fun modePacket(mode: String): ByteArray = hex("0400040009000D") + byteArrayOf(MODE.getValue(mode).toByte(), 0, 0, 0)
@@ -199,6 +205,7 @@ object PhoneDirect {
                     while (true) {
                         val n = sock.inputStream.read(buf)
                         if (n <= 0) break
+                        PacketLog.aap(context, false, buf, n)
                         // Last seen / finder: the battery packet and the IRK reply (see Tracker)
                         AapTrack.batteryFrom(buf, n)?.let { Tracker.rememberBattery(context, Tracker.AIRPODS, it) }
                         AapTrack.irkFrom(buf, n)?.let { Tracker.rememberIrk(context, it) }
@@ -214,18 +221,18 @@ object PhoneDirect {
                     }
                 }
             }.apply { isDaemon = true; start() }
-            out.write(HANDSHAKE); out.flush(); Thread.sleep(250)
-            out.write(FEATURES); out.flush(); Thread.sleep(150)
-            out.write(NOTIFY); out.flush()
+            write(context, out, HANDSHAKE); Thread.sleep(250)
+            write(context, out, FEATURES); Thread.sleep(150)
+            write(context, out, NOTIFY)
             // Ask once for the key that resolves the AirPods' rotating BLE address (local only, see Tracker)
-            if (Tracker.wantIrk(context)) { Thread.sleep(150); out.write(AapTrack.REQUEST_IRK); out.flush() }
+            if (Tracker.wantIrk(context)) { Thread.sleep(150); write(context, out, AapTrack.REQUEST_IRK) }
             if (setTo != null) {
                 Thread.sleep(150)
-                out.write(hex("0400040009000D") + byteArrayOf(MODE.getValue(setTo).toByte(), 0, 0, 0)); out.flush()
+                write(context, out, modePacket(setTo))
             }
             for (c in controls) {
                 Thread.sleep(150)
-                out.write(hex("040004000900") + byteArrayOf(c.first.toByte(), c.second.toByte(), 0, 0, 0)); out.flush()
+                write(context, out, controlPacket(c.first, c.second))
             }
             // Settings the AirPods never echo (see NO_ECHO) can't be confirmed; give the bytes a moment to
             // leave before the link closes. The rest are confirmed by the AirPods repeating them.

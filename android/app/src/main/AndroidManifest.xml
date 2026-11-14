@@ -81,6 +81,12 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- Packets: the Bluetooth bytes this app sends and reads, decoded and masked, in memory only -->
+        <activity
+            android:name=".PacketsActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
         <!-- Last seen: map, history, permissions -->
         <activity
             android:name=".TrackActivity"

@@ -146,6 +146,17 @@ AirPods battery over AAP: `04 00 04 00 04 00 <count>` then per component `<type>
 No "play a sound" command is documented by LibrePods (its README lists it as planned, not done), so the app
 doesn't send one.
 
+### Seeing the packets live (Android Packets screen)
+
+The phone app's *Packets* screen (1.8.0) logs every AAP packet and AT command/reply at the one place each
+crosses the socket (`PhoneDirect.write` and the AAP readers, `CrusherDirect`'s session) and decodes them with
+the tables above. Opcodes it decodes: `0x04` battery, `0x06` ear detection, `0x09` control commands, `0x0E`
+audio source, `0x0F` notifications, `0x17` head tracking, `0x1A` rename, `0x1D` device info, `0x2E` connected
+devices, `0x30`/`0x31` proximity keys, `0x4B` Conversation Awareness, `0x4D` feature flags, `0x58` mic stream;
+anything else shows as "unknown opcode". Addresses (`0x0E`, `0x2E`), key bytes (`0x31`), names and serials
+(`0x1A`, `0x1D`, and any text in any packet except model numbers and firmware versions) are masked before
+they are stored.
+
 ## Panel HTTP API (laptop, 127.0.0.1:8970, published over Tailscale)
 
 | Method | Path | Body | Notes |

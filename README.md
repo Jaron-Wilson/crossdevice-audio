@@ -275,6 +275,31 @@ flowchart LR
 
 <p align="center"><img src="docs/images/how-it-fits-together.png" width="820" alt="How it fits together (image)"></p>
 
+## Packets (Android 1.8.0)
+
+*Packets* on the main screen shows, live, every Bluetooth packet the app sends to or reads from the AirPods
+(AAP over L2CAP `0x1001`) and the Crusher (AT text over RFCOMM channel 9): time, sent or received, device, the
+bytes in hex, and what they mean, decoded with the app's own parsers (`PacketDecode.kt`). For example:
+
+```
+SENT AirPods  Set noise mode: Transparency
+     04 00 04 00 09 00 0D 03 00 00 00
+RECV AirPods  Battery: L 80% · R 75% · Case 40%
+RECV AirPods  Audio source: a device (address hidden), media
+     04 00 04 00 0E 00 xx xx xx xx xx xx 02
+SENT Crusher  Ask the noise mode
+     "AT.UIAUDIO?\r"  41 54 2E 55 49 41 55 44 49 4F 3F 0D
+```
+
+- Bluetooth addresses, serial numbers, device names and key bytes are always masked, as `xx` in the hex and
+  "(hidden)" in the text. Besides the fields known to hold them, any text inside an AAP packet (except model
+  numbers and firmware versions) and any copy of the AirPods' or Crusher's address or the AirPods' IRK is
+  hidden wherever it appears, so an unknown packet doesn't leak them either.
+- Mic-stream audio (`0x58`, ~130 packets a second) is folded into one "Mic audio x N/s" line; only its header
+  is shown.
+- The last 500 packets are kept in memory only, never written to disk. Pause, Clear, a device filter and Copy
+  (the masked text). *Read AirPods* and *Read Crusher* only ask for the current state; they change nothing.
+
 ## Repository layout
 
 | Path | What it is |
@@ -288,7 +313,7 @@ flowchart LR
 | `laptop/apple-did.sh` | Switches BlueZ to Apple's Device ID (and back with `undo`). |
 | `windows/crusher_win.py` | Crusher control on Windows with no driver: RFCOMM through Winsock `AF_BTH` via ctypes. |
 | `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, and the Windows connection check. |
-| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Last seen and Find (`Tracker.kt`, `TrackActivity.kt`, `FinderActivity.kt`, the testable parts in `TrackLogic.kt`) and Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`). |
+| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Last seen and Find (`Tracker.kt`, `TrackActivity.kt`, `FinderActivity.kt`, the testable parts in `TrackLogic.kt`) and Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`) and Packets (`PacketsActivity.kt`, `PacketLog.kt`, the testable `PacketDecode.kt`). |
 | `docs/HOW-IT-WORKS.md` | The multi-device findings, with the packets that prove them. |
 | `docs/PROTOCOL.md` | The Crusher AT commands, the AAP packets, the BLE battery format and the panel API. |
 

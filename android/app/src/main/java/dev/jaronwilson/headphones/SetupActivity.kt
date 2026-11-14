@@ -642,6 +642,13 @@ class SetupActivity : Activity() {
             }
             setOnClickListener { startActivity(Intent(this@SetupActivity, ListenActivity::class.java)) }
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(54)).apply { bottomMargin = dp(6) })
+        col.addView(Button(this).apply {
+            text = "Packets (live Bluetooth bytes)"; isAllCaps = false; textSize = 15f; setTextColor(Color.WHITE)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#3A4656")); cornerRadius = dp(16).toFloat()
+            }
+            setOnClickListener { startActivity(Intent(this@SetupActivity, PacketsActivity::class.java)) }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, dp(50)).apply { bottomMargin = dp(6) })
         buildControls(col)
         col.addView(label("Setup", 15f, "#E8EDF2"))
         col.addView(label("Control your AirPods noise modes and see their battery from a home-screen widget. " +

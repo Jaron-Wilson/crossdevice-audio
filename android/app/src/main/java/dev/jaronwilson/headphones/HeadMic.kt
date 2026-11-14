@@ -63,7 +63,7 @@ class HeadMic(private val context: Context, private val listener: Listener) {
 
     /** Send an AAP packet on this session's link (mode changes while listening). */
     fun send(pkt: ByteArray): Boolean = runCatching {
-        sock?.outputStream?.apply { write(pkt); flush() } ?: return false
+        PhoneDirect.write(context, sock?.outputStream ?: return false, pkt)
     }.isSuccess
 
     private fun run() {
@@ -126,6 +126,7 @@ class HeadMic(private val context: Context, private val listener: Listener) {
                         val n = input.read(buf)
                         if (n <= 0) break
                         rxCount++
+                        PacketLog.aap(context, false, buf, n)
                         val isMic = n >= 6 && buf[4] == 0x58.toByte() && buf[5] == 0.toByte()
                         // Packet dumps (they can hold device addresses): adb shell setprop log.tag.HeadMic VERBOSE
                         if (dump && (!isMic || micCount < 20 || micCount % 1000 == 0))
@@ -138,7 +139,7 @@ class HeadMic(private val context: Context, private val listener: Listener) {
                             // Device information: log only the model and firmware-looking strings (no serials)
                             val parts = String(buf, 6, n - 6, Charsets.ISO_8859_1).split('\u0000')
                                 .map { it.filter { c -> c in ' '..'~' } }.filter { it.length >= 3 }
-                            Log.d(TAG, "AirPods info: " + parts.filter { Regex("^(A\\d{4}|\\d+[A-Z]\\d+[a-z]?|\\d+\\.\\d+.*)$").matches(it) })
+                            Log.d(TAG, "AirPods info: " + parts.filter { PacketDecode.NOT_PERSONAL.matches(it) })
                         }
                         if (AapMic.isAudio(buf, n)) {
                             lastAudio = System.currentTimeMillis(); gotAudio = true
@@ -212,9 +213,9 @@ class HeadMic(private val context: Context, private val listener: Listener) {
         synchronized(PhoneDirect.aapLock) {             // no other AAP link until this one is closed
             sock = null
             PhoneDirect.live = null
-            runCatching { s.outputStream.apply { write(AapMic.STOP); flush() } }
+            runCatching { PhoneDirect.write(context, s.outputStream, AapMic.STOP) }
             if (caBefore == 1) runCatching {
-                Thread.sleep(150); s.outputStream.apply { write(PhoneDirect.controlPacket(0x28, 1)); flush() }
+                Thread.sleep(150); PhoneDirect.write(context, s.outputStream, PhoneDirect.controlPacket(0x28, 1))
                 context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_CA).apply()
             }
             runCatching { Thread.sleep(150); s.close() }
