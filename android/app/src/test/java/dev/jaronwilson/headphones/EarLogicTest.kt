@@ -271,4 +271,70 @@ class EarLogicTest {
         m.onEars(ears(OUT, OUT), true, true, 0, true, true)
         assertEquals(ListenGuard.Act.NONE, m.onEars(ears(IN, IN), false, false, AutoPause.RESUME_WINDOW_MS + 1, true, true))
     }
+
+    // ---- the lid closes on a bud (seen live): ear report "unknown" for it, battery "disconnected"
+    private val beforeLid = hex("04 00 04 00 04 00 03 02 01 58 02 01 04 01 5b 01 01 08 01 ff 04 01")
+    private val afterLid = hex("04 00 04 00 04 00 03 02 01 58 02 01 04 01 00 04 01 08 01 00 04 01")
+
+    @Test fun lidClosedOnTheLeftBud() {
+        assertEquals(BudPower(left = 1, right = 2, firstIsLeft = false), BudPower.from(beforeLid))   // left charging
+        assertEquals(BudPower(left = 4, right = 2, firstIsLeft = false), BudPower.from(afterLid))    // left off the link
+        val s = SideTracker()
+        s.onEar(EarReport.decode(hex("04 00 04 00 06 00 00 02"))!!, 0)        // right in ear, left in case
+        s.onBattery(BudPower.from(beforeLid)!!, 10)
+        assertEquals(false, s.primaryIsLeft)
+        val closed = EarReport(Bud.IN_EAR, Bud.UNKNOWN)                        // the report after the lid closed
+        s.onEar(closed, 5000)
+        s.onBattery(BudPower.from(afterLid)!!, 5010)
+        val shown = s.resolve(closed)
+        assertEquals(EarReport(Bud.IN_EAR, Bud.CASE_CLOSED), shown)
+        assertEquals("Left: in case (lid closed), Right: in ear", EarText.describe(shown, s.primaryIsLeft))
+        // and with the battery report first
+        val t = SideTracker()
+        t.onEar(EarReport(Bud.IN_EAR, Bud.IN_CASE), 0); t.onBattery(BudPower.from(beforeLid)!!, 10)
+        t.onBattery(BudPower.from(afterLid)!!, 5000); t.onEar(closed, 5010)
+        assertEquals(EarReport(Bud.IN_EAR, Bud.CASE_CLOSED), t.resolve(closed))
+    }
+
+    @Test fun budThatWasOutAndDropsOffIsDisconnected() {
+        val s = SideTracker()
+        s.onEar(EarReport(Bud.IN_EAR, Bud.OUT), 0)
+        s.onBattery(BudPower(2, 2, false), 10)                    // order fallback: right primary
+        val r = EarReport(Bud.IN_EAR, Bud.UNKNOWN)
+        s.onEar(r, 1000); s.onBattery(BudPower(4, 2, false), 1010)
+        assertEquals(EarReport(Bud.IN_EAR, Bud.GONE), s.resolve(r))
+        assertEquals("Left: disconnected, Right: in ear", EarText.describe(s.resolve(r), s.primaryIsLeft))
+        // without battery news it stays unknown
+        assertEquals(r, SideTracker().resolve(r))
+    }
+
+    @Test fun lidClosedCountsAsCaseForPause() {
+        val p = AutoPause()
+        p.onEars(ears(IN, IN), true, 0, true, true)
+        assertEquals(AutoPause.Act.PAUSE, p.onEars(ears(OUT, OUT), true, 1000, true, true))
+        assertEquals(AutoPause.Act.NONE, p.onEars(ears(Bud.CASE_CLOSED, CASE), false, 2000, true, true))
+        assertFalse(p.pausedByUs)                                   // both in the case: no resume
+        assertTrue(ears(Bud.CASE_CLOSED, Bud.CASE_CLOSED).bothInCase)
+        assertTrue(ears(IN, Bud.CASE_CLOSED).known)
+    }
+
+    @Test fun lidClosedBeforeTheLinkOpened() {
+        // the left bud went into the case and charged on an earlier link; then the link closed and reopened
+        val s = SideTracker()
+        s.onEar(EarReport(Bud.IN_EAR, Bud.IN_CASE), 0); s.onBattery(BudPower.from(beforeLid)!!, 10)
+        s.reset()
+        // the new link: the battery report first (left off the link), then "in ear / unknown"
+        val closed = EarReport(Bud.IN_EAR, Bud.UNKNOWN)
+        s.onBattery(BudPower.from(afterLid)!!, 1000); s.onEar(closed, 1005)
+        assertEquals(false, s.primaryIsLeft)                       // right listed first
+        assertEquals("Left: in case (lid closed), Right: in ear", EarText.describe(s.resolve(closed), s.primaryIsLeft))
+    }
+
+    @Test fun offTheLinkWithNoHistoryIsTheClosedCase() {
+        // seen live after an app update: the lid was already closed, nothing remembered about the left bud
+        val s = SideTracker()
+        val closed = EarReport(Bud.IN_EAR, Bud.UNKNOWN)
+        s.onBattery(BudPower.from(afterLid)!!, 0); s.onEar(closed, 8)
+        assertEquals("Left: in case (lid closed), Right: in ear", EarText.describe(s.resolve(closed), s.primaryIsLeft))
+    }
 }

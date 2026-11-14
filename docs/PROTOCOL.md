@@ -156,6 +156,13 @@ in the case", and which one is left needs a second source. The newest of these o
 4. **Role swap inference**: a report `(a, b)` followed within 2 s by `(b, a)`, with no other observation in
    between, is the primary hand-off, so the known side flips with it.
 
+**Lid closed on a bud** (seen live): the bud in the case drops off the link, so the ear report gives a value
+other than 0/1/2 for it ("unknown") and the battery report state `04` (disconnected, level 0). The app then shows
+that bud as "in case (lid closed)" if it was last in the case or charging, or if nothing is known about it (a bud
+out of the case stays on the link), and treats it as in the case for auto-pause and resume; a bud that was last in
+an ear or out and then drops off reads "disconnected". The last place and charging state of each side are kept
+across links and app restarts for this.
+
 If none of these is known yet, the app says "One bud in ear, the other in case (which is left isn't known yet)"
 instead of guessing. The pause and listening rules don't need the sides: they count buds in an ear.
 

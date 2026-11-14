@@ -6,9 +6,14 @@ package dev.jaronwilson.headphones
  * and [EarService].
  */
 
-/** Where one bud is, as the AirPods report it in AAP 0x06 (they sense it themselves). */
+/** Where one bud is, as the AirPods report it in AAP 0x06 (they sense it themselves). The last two are the
+ *  app's own reading of a bud the report no longer covers (see [SideTracker.resolve]); never on the wire. */
 enum class Bud(val code: Int, val words: String) {
-    IN_EAR(0, "in ear"), OUT(1, "out of ear"), IN_CASE(2, "in case"), UNKNOWN(-1, "unknown");
+    IN_EAR(0, "in ear"), OUT(1, "out of ear"), IN_CASE(2, "in case"), UNKNOWN(-1, "unknown"),
+    CASE_CLOSED(-2, "in case (lid closed)"), GONE(-3, "disconnected");
+
+    /** In the case, lid open or closed. */
+    val inCase get() = this == IN_CASE || this == CASE_CLOSED
 
     companion object {
         fun of(b: Int) = entries.firstOrNull { it.code == b } ?: UNKNOWN
@@ -23,7 +28,7 @@ enum class Bud(val code: Int, val words: String) {
 data class EarReport(val primary: Bud, val secondary: Bud) {
     /** How many buds are in an ear (0, 1 or 2). */
     val inEar get() = (if (primary == Bud.IN_EAR) 1 else 0) + (if (secondary == Bud.IN_EAR) 1 else 0)
-    val bothInCase get() = primary == Bud.IN_CASE && secondary == Bud.IN_CASE
+    val bothInCase get() = primary.inCase && secondary.inCase
     val known get() = primary != Bud.UNKNOWN && secondary != Bud.UNKNOWN
     /** Neither bud is in an ear (out, in the case, or one of each). */
     val noneInEar get() = known && inEar == 0
@@ -90,11 +95,51 @@ class SideTracker {
     private var power: BudPower? = null
     private var powerT = -1L
     private var setSinceEar = false
+    /** Each role's last known place (primary, secondary), and each bud's battery state before the latest. */
+    private val lastPlace = arrayOf(Bud.UNKNOWN, Bud.UNKNOWN)
+    private var prevPower: BudPower? = null
+    /** Per side (true = left), kept across links: the last place known for that bud, and whether it was
+     *  last seen charging. So a lid closed before the link opened still reads "in case (lid closed)". */
+    val sidePlace = HashMap<Boolean, Bud>()
+    val sideCharging = HashMap<Boolean, Boolean>()
 
     /** A battery report at [t]. */
     fun onBattery(p: BudPower, t: Long) {
+        if (power != null && power != p) prevPower = power
         power = p; powerT = t
+        p.left?.let { if (it == AapTrack.CHARGING || it == AapTrack.DISCHARGING) sideCharging[true] = it == AapTrack.CHARGING }
+        p.right?.let { if (it == AapTrack.CHARGING || it == AapTrack.DISCHARGING) sideCharging[false] = it == AapTrack.CHARGING }
         infer()
+        noteSides()
+    }
+
+    /**
+     * The report as the app shows and acts on it. When the lid closes, the bud in the case drops off the link:
+     * the ear report then says "unknown" for it and the battery report "disconnected" (seen live). Such a bud
+     * reads [Bud.CASE_CLOSED] if it was last in the case (or charging) or nothing is known about it (a bud out
+     * of the case stays on the link), else [Bud.GONE] (it was in an ear or out, and went away).
+     */
+    fun resolve(r: EarReport): EarReport {
+        fun fix(b: Bud, role: Int): Bud {
+            if (b != Bud.UNKNOWN) return b
+            val p = power ?: return b
+            val pl = primaryIsLeft
+            // which bud this role is: by the known side, else the only bud that is off the link
+            val isLeft: Boolean = when {
+                pl != null -> if (role == 0) pl else !pl
+                (p.left == AapTrack.DISCONNECTED) != (p.right == AapTrack.DISCONNECTED) -> p.left == AapTrack.DISCONNECTED
+                else -> return b
+            }
+            val st = if (isLeft) p.left else p.right
+            if (st != AapTrack.DISCONNECTED) return b
+            val before = prevPower?.let { if (isLeft) it.left else it.right }
+            val last = lastPlace[role].takeIf { it != Bud.UNKNOWN } ?: sidePlace[isLeft]
+            val wasCharging = before == AapTrack.CHARGING || (before == null && sideCharging[isLeft] == true)
+            // nothing known about it: a bud out of the case stays on the link, so off the link means the closed case
+            if (last == null || last == Bud.UNKNOWN) return Bud.CASE_CLOSED
+            return if (last.inCase || wasCharging) Bud.CASE_CLOSED else Bud.GONE
+        }
+        return EarReport(fix(r.primary, 0), fix(r.secondary, 1))
     }
 
     /** An advert's "primary is left" bit (an observation of now: it replaces older ones). */
@@ -110,7 +155,10 @@ class SideTracker {
             primaryIsLeft?.let { primaryIsLeft = !it; source = "role swap" }
         }
         lastEar = r; lastEarT = t; setSinceEar = false
+        if (r.primary != Bud.UNKNOWN) lastPlace[0] = r.primary
+        if (r.secondary != Bud.UNKNOWN) lastPlace[1] = r.secondary
         infer()
+        noteSides()
     }
 
     private fun infer() {
@@ -129,7 +177,20 @@ class SideTracker {
     }
 
     /** The link closed: what it said no longer holds. */
-    fun reset() { primaryIsLeft = null; source = ""; lastEar = null; lastEarT = -1; power = null; powerT = -1; setSinceEar = false }
+    fun reset() {
+        primaryIsLeft = null; source = ""; lastEar = null; lastEarT = -1; power = null; powerT = -1; setSinceEar = false
+        lastPlace.fill(Bud.UNKNOWN); prevPower = null
+    }
+
+    private fun noteSides() {
+        val r = lastEar ?: return
+        val pl = primaryIsLeft ?: return
+        if (r.primary != Bud.UNKNOWN) sidePlace[pl] = r.primary
+        if (r.secondary != Bud.UNKNOWN) sidePlace[!pl] = r.secondary
+    }
+
+    /** The latest raw ear report, or null. */
+    fun lastRaw(): EarReport? = lastEar
 
     companion object {
         const val SWAP_MS = 2000L

@@ -58,7 +58,12 @@ object Ears {
     internal fun changed() { for (w in watchers) runCatching { w() } }
 
     /** Raw report from the link (reader thread). */
+    /** Gets every change of the resolved report ([SideTracker.resolve]); [EarService] debounces and acts on it. */
+    @Volatile var sink: ((EarReport) -> Unit)? = null
+    @Volatile private var shown: EarReport? = null
+
     fun onRaw(c: Context, r: EarReport) {
+        loadSides(c)
         val pl = synchronized(side) {
             if (side.primaryIsLeft == null) EarPrefs.advertSide(c)?.let { side.onAdvert(it) }
             side.onEar(r, System.currentTimeMillis())
@@ -66,13 +71,26 @@ object Ears {
         }
         Log.d(TAG, "ear report: ${r.primary.words} / ${r.secondary.words}, primary is " +
             (when (pl) { true -> "left"; false -> "right"; null -> "not known" }) + " (${side.source})")
+        publish(c, force = true)
+    }
+
+    /** Store and pass on the report as resolved now (after an ear or battery report). */
+    private fun publish(c: Context, force: Boolean = false) {
+        val (r, pl) = synchronized(side) { (side.lastRaw()?.let { side.resolve(it) }) to side.primaryIsLeft }
+        if (r == null) return
+        saveSides(c)
+        if (!force && r == shown) return
+        if (r != shown) Log.d(TAG, "shown: ${EarText.describe(r, pl)}")
+        shown = r
         PhoneDirect.rememberEar(c, r.primary.code to r.secondary.code, pl)
+        sink?.invoke(r)
     }
 
     /** A battery report (levels and charging states only: nothing personal in it). */
     fun onBatteryPacket(c: Context, p: ByteArray) {
         Log.d(TAG, "battery packet: " + p.joinToString(" ") { "%02x".format(it) })
         val bp = BudPower.from(p) ?: return
+        loadSides(c)
         val (was, pl) = synchronized(side) {
             val w = side.primaryIsLeft
             side.onBattery(bp, System.currentTimeMillis())
@@ -81,6 +99,7 @@ object Ears {
         Log.d(TAG, "battery: left state ${bp.left}, right state ${bp.right}, listed first: " +
             when (bp.firstIsLeft) { true -> "left"; false -> "right"; null -> "-" } + "; side ${sideKnown()}")
         if (pl != was) relabel(c, pl, sideKnown().second)
+        publish(c)
     }
 
     /** The side changed: re-label the last report with it and tell the screens. */
@@ -99,7 +118,29 @@ object Ears {
         synchronized(side) { side.onAdvert(primaryLeft) }
     }
 
-    fun onLinkClosed() = synchronized(side) { side.reset() }
+    /** Keep [SideTracker.sidePlace] / [SideTracker.sideCharging] over app restarts. */
+    private fun saveSides(c: Context) {
+        val (pl, ch) = synchronized(side) { side.sidePlace.toMap() to side.sideCharging.toMap() }
+        val e = c.getSharedPreferences("ears", Context.MODE_PRIVATE).edit()
+        for ((k, v) in pl) e.putInt(if (k) "place_l" else "place_r", v.code)
+        for ((k, v) in ch) e.putBoolean(if (k) "chg_l" else "chg_r", v)
+        e.apply()
+    }
+
+    @Volatile private var loaded = false
+    private fun loadSides(c: Context) {
+        if (loaded) return
+        loaded = true
+        val p = c.getSharedPreferences("ears", Context.MODE_PRIVATE)
+        synchronized(side) {
+            for ((k, key) in listOf(true to "l", false to "r")) {
+                if (p.contains("place_$key") && k !in side.sidePlace) side.sidePlace[k] = Bud.of(p.getInt("place_$key", -1))
+                if (p.contains("chg_$key") && k !in side.sideCharging) side.sideCharging[k] = p.getBoolean("chg_$key", false)
+            }
+        }
+    }
+
+    fun onLinkClosed() { synchronized(side) { side.reset() }; shown = null }
 
     /** Which bud is primary, as far as the app knows now, and from what. */
     fun sideKnown(): Pair<Boolean?, String> = synchronized(side) { side.primaryIsLeft to side.source }
@@ -200,18 +241,16 @@ class EarService : Service() {
     private var connecting = false
 
     private val rx = object : AapLink.Listener {
-        override fun onPacket(p: ByteArray, n: Int) {
-            if (AapMic.isAudio(p, n)) return
-            val r = EarReport.decode(p, n) ?: return
-            main.post { onRaw(r) }
-        }
         override fun onClosed() { main.post { linkLost() } }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private val sinkFn: (EarReport) -> Unit = { r -> main.post { onRaw(r) } }
+
     override fun onCreate() {
         super.onCreate()
+        Ears.sink = sinkFn
         val ch = NotificationChannel(CH, "Ear detection", NotificationManager.IMPORTANCE_MIN).apply {
             setShowBadge(false); setSound(null, null); enableVibration(false)
             description = "Shown while the app listens for the AirPods' in-ear reports. Silent."
@@ -228,6 +267,7 @@ class EarService : Service() {
     }
 
     override fun onDestroy() {
+        if (Ears.sink === sinkFn) Ears.sink = null
         main.removeCallbacksAndMessages(null)
         val wasLinked = linked
         linked = false
