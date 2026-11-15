@@ -79,7 +79,7 @@ detection, adaptive EQ, ANC sync, sidetone, NR. Never send the `0x0E06` "AncStag
 while exploring: they change the ANC filter.
 
 So the Crusher can't sense the room for us without call mode. The only headset-side sensor is its call mic
-(HFP), which is what Crusher Adaptive's opt-in *headset mic* option uses, only while nothing plays.
+(HFP), which is what Crusher Adaptive listens through (its only mic), only while nothing plays.
 
 ## AirPods Pro 2: AAP over classic L2CAP channel `0x1001`
 
@@ -173,8 +173,8 @@ audio arrives within 5 s it stops and says so, and it never falls back to anothe
 known that reports an ambient noise *level*: Adaptive Audio measures it inside the AirPods and acts on it.
 
 The Crusher reports nothing it senses over AT: `AT.UIAUDIO?` and its unsolicited `.UIAUDIO` lines give only the
-mode, `AT.CRUSHER?` the bass. That is why Crusher Adaptive (README) listens with the computer's own mic and only
-sends the mode commands above plus `AT.UIAUDIO=transparency,,<n>` (and `AT.VOLUME` on Windows for "lower media").
+mode, `AT.CRUSHER?` the bass. That is why Crusher Adaptive (README) listens through the Crusher's own call mic
+(only while nothing plays) and only sends the mode commands above plus `AT.UIAUDIO=transparency,,<n>`.
 Over Airoha RACE it doesn't either: the environment detection, full adaptive ANC and adaptive EQ queries of
 the SDK go unanswered on this firmware (see "Airoha RACE" above).
 
@@ -268,8 +268,8 @@ they are stored.
 | GET | `/api/caps` | | `{crusher:bool, airpods:bool, crusher_adaptive:bool, eq:bool}`. Fast; the rings poll it |
 | POST | `/api/airpods/mode` | `off\|anc\|transparency\|adaptive` | 503 if the AirPods aren't connected |
 | POST | `/api/crusher/mode` | `anc\|transparency\|off\|adaptive` | `adaptive` turns Crusher Adaptive on (and ends a pause). The other three are a manual change: they pause Adaptive. So does setting `transparency_level` |
-| GET | `/api/crusher/adaptive` | | `{available, enabled, paused, paused_for_s, listening, mic, source:host\|headset\|"", headset_offered, headset_error, media_playing, status, error, ambient_db, raw_db, zone:quiet\|moderate\|loud, steady, speech, held, conversation, target:{mode,level,label}, thresholds:{quiet_max,loud_min}, settings, mics}`. Also in `/api/state` as `crusher.adaptive` (without `mics`) |
-| POST | `/api/crusher/adaptive` | `{"enabled":true,"sensitivity":60,"conversation":true,"duck":false,"mic":"","pause_min":10,"headset_mic":false}` | Any subset. `mic` must be one of `mics` (`""` = automatic); `pause_min` 0 = until Adaptive is picked again; `headset_mic` true = the Crusher's own mic (call profile) while nothing plays |
+| GET | `/api/crusher/adaptive` | | `{available, enabled, paused, paused_for_s, listening, mic, phase:off\|paused\|no_crusher\|music\|quiet_wait\|mic_error\|listening, music_hold, media_playing, mic_error, status, error, ambient_db, raw_db, zone:quiet\|moderate\|loud, steady, speech, conversation, target:{mode,level,label}, thresholds:{quiet_max,loud_min}, settings}`. `mic` is the Crusher's mic while it listens (the only mic it uses); `music_hold` true = paused while music plays (or in the 10 s after), holding `target`. Also in `/api/state` as `crusher.adaptive` |
+| POST | `/api/crusher/adaptive` | `{"enabled":true,"sensitivity":60,"conversation":true,"pause_min":10}` | Any subset. `pause_min` 0 = until Adaptive is picked again |
 | POST | `/api/crusher/bass` | `0-10` | |
 | POST | `/api/handoff` | `phone\|laptop` | Who has the AirPods. The laptop steps aside for the phone |
 | GET | `/api/track` | | Last seen on the laptop: `{airpods:{connected, last_connected, events:[{t, event:connected\|disconnected, where:"laptop"}]}, crusher:{…}}`. Times are Unix seconds. Polled from BlueZ every 30 s, last 50 per device, stored in `~/.local/state/headphone-panel/track.json` |
@@ -298,7 +298,7 @@ What the panel does instead (`laptop/hp_sound.py`):
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| GET | `/state` | | The same fields as the panel's `/api/crusher/adaptive`, with `mics:[{name, safe, virtual}]` |
-| POST | `/enable` / `/disable` | | Turn it on (ends a pause) or off (closes the mic, puts the volume back) |
+| GET | `/state` | | The same fields as the panel's `/api/crusher/adaptive`, with `crusher_mic` (the Crusher's Hands-Free input name, or null) |
+| POST | `/enable` / `/disable` | | Turn it on (ends a pause) or off (closes the mic) |
 | POST | `/manual` | | A mode was changed by hand: pause. `crusher_win.py anc\|transparency\|transparency-level` sends it |
-| POST | `/set` | `{"sensitivity":60,"conversation":true,"duck":false,"mic":"Webcam","pause_min":10,"headset_mic":false}` | `mic` is part of a device name; a headset or Bluetooth mic is refused as the room mic (use `headset_mic`). Virtual inputs are only used if named |
+| POST | `/set` | `{"sensitivity":60,"conversation":true,"pause_min":10}` | Any subset. There is no mic choice: only the Crusher's own mic is ever opened |

@@ -421,12 +421,15 @@ class CrusherAdaptiveTest {
         assertEquals(1, s.sent.size)
     }
 
-    @Test fun duckFlag() {
-        val s = Sim(Policy(Settings(mapOf("duck" to true)))).hold(rd(QUIET), 6.0)
+    @Test fun endConversationReturnsTheZoneTarget() {
+        val p = Policy()
+        val s = Sim(p).hold(rd(QUIET), 6.0)
         s.hold(rd(QUIET, speech = true), 2.0)
-        assertTrue(s.sent.last().second.duck)
-        s.hold(rd(QUIET), 6.0)
-        assertFalse(s.sent.last().second.duck)
+        assertTrue(p.conv)
+        assertTrue(p.desired()!!.conv)
+        p.endConversation()
+        assertFalse(p.conv)
+        assertEquals(Target("transparency", 50), p.desired())
     }
 
     @Test fun turningAwarenessOffMidConversationReturns() {
@@ -486,20 +489,18 @@ class CrusherAdaptiveTest {
     // ---- settings ----
     @Test fun settingsClampingAndTypes() {
         val st = Settings(mapOf("sensitivity" to 500, "pause_min" to -3, "conversation" to "off", "duck" to "on",
-            "mic" to 7, "unknown" to 1, "hold_s" to 0.0, "headset_mic" to "yes"))
+            "mic" to 7, "unknown" to 1, "hold_s" to 0.0, "headset_mic" to "yes"))   // old keys are ignored
         assertEquals(100, st.sensitivity)
         assertEquals(0, st.pauseMin)
         assertFalse(st.conversation)
-        assertTrue(st.duck)
-        assertEquals("7", st.mic)
         assertEquals(0.5, st.holdS, 0.0)
-        assertTrue(st.headsetMic)
         assertFalse(st.asMap().containsKey("unknown"))
+        assertFalse(st.asMap().containsKey("duck")); assertFalse(st.asMap().containsKey("mic")); assertFalse(st.asMap().containsKey("headset_mic"))
     }
 
     @Test fun settingsDefaults() {
         val st = Settings()
-        assertFalse(st.enabled); assertFalse(st.headsetMic); assertFalse(st.duck); assertTrue(st.conversation)
+        assertFalse(st.enabled); assertTrue(st.conversation)
         assertEquals(50, st.sensitivity); assertEquals(10, st.pauseMin)
         assertEquals(4.0, st.holdS, 0.0); assertEquals(12.0, st.dwellS, 0.0)
         assertEquals(10.0, CA.HEADSET_IDLE_S, 0.0)
@@ -568,10 +569,9 @@ class CrusherAdaptiveTest {
     private inner class Rig(rs: List<Reading> = emptyList(), val fail: Boolean = false, settings: Map<String, Any?> = emptyMap()) {
         var t = 1000.0
         val sent = ArrayList<Pair<Double, List<String>>>()
-        val ducks = ArrayList<Boolean>()
         val meter = FakeMeter(rs)
         val core = AdaptiveCore(Settings(settings), send = { c -> if (fail) throw RuntimeException("not reachable"); sent += t to c },
-            duck = { ducks += it }, clock = { t }, meter = meter)
+            clock = { t }, meter = meter)
         fun steps(n: Int, dt: Double = 0.5) = repeat(n) { t += dt; core.process(FloatArray(1)) }
     }
 
@@ -641,20 +641,34 @@ class CrusherAdaptiveTest {
         assertTrue(r.core.observe("off", now + 20))
     }
 
-    @Test fun coreDucksOnConversationAndBack() {
-        val seq = List(12) { rd(QUIET) } + List(4) { rd(QUIET, speech = true) } + List(16) { rd(QUIET) }
-        val r = Rig(seq, settings = mapOf("enabled" to true, "duck" to true))
+    @Test fun holdForMediaEndsAConversationAndSendsTheZoneTarget() {
+        val seq = List(12) { rd(QUIET) } + List(4) { rd(QUIET, speech = true) }
+        val r = Rig(seq, settings = mapOf("enabled" to true))
         r.steps(seq.size)
-        assertEquals(listOf(true, false), r.ducks)
+        assertTrue(r.core.policy.conv)
+        assertTrue(r.core.policy.applied!!.conv)
+        val before = r.sent.size
+        r.t += 5.0
+        r.core.holdForMedia(r.t)
+        assertFalse(r.core.policy.conv)
+        assertEquals(before + 1, r.sent.size)
+        assertEquals(Target("transparency", 50), r.core.policy.applied)
+        assertNull(r.core.last)
     }
 
-    @Test fun coreTurningOffRestoresTheVolume() {
-        val seq = List(12) { rd(QUIET) } + List(4) { rd(QUIET, speech = true) }
-        val r = Rig(seq, settings = mapOf("enabled" to true, "duck" to true))
-        r.steps(seq.size)
-        assertEquals(listOf(true), r.ducks)
-        r.core.set(mapOf("enabled" to false))
-        assertEquals(listOf(true, false), r.ducks)
+    @Test fun holdForMediaWithoutAConversationSendsNothing() {
+        val r = Rig(List(12) { rd(QUIET) }, settings = mapOf("enabled" to true))
+        r.steps(12)
+        val applied = r.core.policy.applied
+        val sent = r.sent.size
+        val resets = r.meter.resets
+        r.t += 10.0
+        r.core.holdForMedia(r.t)
+        assertEquals(sent, r.sent.size)
+        assertEquals(applied, r.core.policy.applied)
+        assertEquals("quiet", r.core.policy.zone)
+        assertNull(r.core.last)
+        assertEquals(resets + 1, r.meter.resets)
     }
 
     @Test fun coreSourceChangeResetsTheMeterButKeepsTheTarget() {

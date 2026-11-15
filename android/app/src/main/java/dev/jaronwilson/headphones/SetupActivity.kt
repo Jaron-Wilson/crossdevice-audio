@@ -86,8 +86,6 @@ class SetupActivity : Activity() {
     private lateinit var adSens: SeekBar
     private lateinit var adSensText: TextView
     private lateinit var adConv: Switch
-    private lateinit var adDuck: Switch
-    private lateinit var adHeadset: Switch
     private lateinit var adPause: Spinner
     private val adPauseMins = listOf(5, 10, 30, 0)
     private val adPoll = object : Runnable {
@@ -315,7 +313,7 @@ class SetupActivity : Activity() {
         cr.addView(modeRow(crModeBtns, listOf("adaptive" to "Adaptive", "anc" to "ANC", "transparency" to "Clear", "off" to "Off")) { setCrMode(it) })
         cr.addView(TextView(this).apply {
             text = "The Crusher has no adaptive mode of its own and reports no outside-noise level. Adaptive is done by " +
-                "this phone listening to the room (see Crusher Adaptive below); ANC, Clear and Off are set by you " +
+                "this phone listening through the Crusher's own mic, never the phone's (see Crusher Adaptive below); ANC, Clear and Off are set by you " +
                 "(or by Smart adaptive, from the phone's motion sensors). Picking one by hand pauses Adaptive."
             textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(4), 0, dp(4))
         })
@@ -349,11 +347,14 @@ class SetupActivity : Activity() {
         col.addView(label("Crusher Adaptive", 15f, "#E8EDF2"))
         val c = card()
         c.addView(TextView(this).apply {
-            text = "An Adaptive mode for the Crusher, which has none. This phone listens to the room with its own " +
-                "microphone and moves the Crusher between ANC, Transparency and Off: quiet room, Transparency; " +
-                "loud or steady noise, ANC; someone talking nearby, Transparency up high, back a few seconds after they stop. " +
-                "The microphone is open only while this is on and the Crusher is connected to this phone. Nothing is " +
-                "recorded or sent anywhere: each moment of sound is measured as a number and dropped."
+            text = "An Adaptive mode for the Crusher, which has none. It listens to the room only through the Crusher's own " +
+                "microphone (Bluetooth call mode), never the phone's microphone, and moves the Crusher between ANC, " +
+                "Transparency and Off: quiet room, Transparency; loud or steady noise, ANC; someone talking nearby, " +
+                "Transparency up high, back a few seconds after they stop. It listens only after nothing has played for " +
+                "10 seconds and stops the moment anything plays, holding the last mode meanwhile (\"paused while music plays\"). " +
+                "While it listens the Crusher is in call mode (call-quality sound), which is why it never listens during music. " +
+                "It works on the phone by itself, no computer needed. Nothing is recorded or sent anywhere: each moment of " +
+                "sound is measured as a number and dropped."
             textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(8), 0, dp(4))
         })
         adSw = switch("Crusher Adaptive") { on -> toggleAdaptive(on) }.also { c.addView(it) }
@@ -372,8 +373,6 @@ class SetupActivity : Activity() {
         c.addView(ends("Only loud noise", "Even quiet noise"))
         adConv = switch("Conversation awareness (Transparency when someone talks)") { on ->
             CrusherAdaptiveCtl.update(this, mapOf("conversation" to on)) }.also { c.addView(it) }
-        adDuck = switch("Lower the media while someone talks") { on ->
-            CrusherAdaptiveCtl.update(this, mapOf("duck" to on)) }.also { c.addView(it) }
         val pr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         pr.addView(TextView(this).apply { text = "After I change the mode by hand, pause"; textSize = 13f
             setTextColor(Color.parseColor("#E8EDF2")) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
@@ -389,15 +388,6 @@ class SetupActivity : Activity() {
         }
         pr.addView(adPause, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.2f))
         c.addView(pr)
-        adHeadset = switch("Use the headset mic when nothing is playing (call quality while it listens)") { on -> toggleHeadsetMic(on) }
-            .also { c.addView(it) }
-        c.addView(TextView(this).apply {
-            text = "Warning: the headset mic works over Bluetooth call mode (HFP). While it listens, the Crusher is in " +
-                "call mode: its sound is call quality and a mode change on the headset can be reported late. It is used " +
-                "only after nothing has played for 10 seconds, and it is dropped the moment media plays (back to " +
-                "music quality), then the phone mic takes over. Off by default; the phone mic is used otherwise."
-            textSize = 12f; setTextColor(Color.parseColor("#FFB86B")); setPadding(0, 0, 0, dp(4))
-        })
         col.addView(c, lp(0))
         refreshAdaptive()
     }
@@ -410,8 +400,6 @@ class SetupActivity : Activity() {
         adSens.progress = st.sensitivity
         adSensText.text = "Sensitivity: ${st.sensitivity} (higher reacts to quieter noise)"
         adConv.isChecked = st.conversation
-        adDuck.isChecked = st.duck
-        adHeadset.isChecked = st.headsetMic
         adPause.setSelection(adPauseMins.indexOf(st.pauseMin).let { if (it < 0) 1 else it })
         binding = false
         refreshAdaptiveStatus()
@@ -435,9 +423,9 @@ class SetupActivity : Activity() {
         if (CrusherAdaptiveCtl.hasMicPermission(this)) { setAdaptiveOn(true); return }
         android.app.AlertDialog.Builder(this)
             .setTitle("Microphone")
-            .setMessage("Crusher Adaptive listens to the room through this phone's microphone to tell quiet from noisy and to hear when someone talks. " +
-                "It measures the loudness and drops the sound at once: nothing is recorded, stored or sent anywhere. " +
-                "The microphone is open only while Adaptive is on and the Crusher is connected, and Android shows its microphone indicator while it is.")
+            .setMessage("Crusher Adaptive listens to the room only through the Crusher's own microphone (Bluetooth call mode), never this phone's microphone. " +
+                "It needs this permission to read that microphone. It listens only after nothing has played for 10 seconds and stops the moment anything plays. " +
+                "It measures the loudness and drops the sound at once: nothing is recorded, stored or sent anywhere. Android shows its microphone indicator while it listens.")
             .setPositiveButton("Continue") { _, _ -> requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC) }
             .setNegativeButton("Cancel") { _, _ -> refreshAdaptive() }
             .setOnCancelListener { refreshAdaptive() }
@@ -451,19 +439,6 @@ class SetupActivity : Activity() {
         if (on && smart) toast("Smart adaptive for the Crusher turned off, so the two don't fight")
         refreshAdaptive(); refreshSmart()
         adStatus.postDelayed({ refreshAdaptive(); loadControls() }, 1500)
-    }
-
-    private fun toggleHeadsetMic(on: Boolean) {
-        if (!on) { CrusherAdaptiveCtl.update(this, mapOf("headset_mic" to false)); return }
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Use the headset mic?")
-            .setMessage("While nothing is playing, Adaptive will listen through the Crusher's own microphone over Bluetooth call mode. " +
-                "The Crusher then sounds like a phone call (low quality) until media plays, when it goes back to music quality and the phone mic is used. " +
-                "Voice assistants or calls may also pick up the headset at those moments. Keep this off if you notice anything odd.")
-            .setPositiveButton("Turn on") { _, _ -> CrusherAdaptiveCtl.update(this, mapOf("headset_mic" to true)) }
-            .setNegativeButton("Cancel") { _, _ -> refreshAdaptive() }
-            .setOnCancelListener { refreshAdaptive() }
-            .show()
     }
 
     // ---- Ear detection ----

@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-r"""Crusher Adaptive on WINDOWS: the PC's own microphone hears the room, the Crusher's mode follows.
+r"""Crusher Adaptive on WINDOWS: the Crusher's own mic hears the room, the Crusher's mode follows.
 
 Same decision as the laptop panel (shared/crusher_adaptive.py); this file is the Windows side:
-  * the mic is read with winmm's waveIn through ctypes (no extra package besides numpy). As the room mic,
-    only a mic that is NOT a Bluetooth headset is opened: opening the Crusher's (or any headset's)
-    Hands-Free mic switches it to call mode. Names with Hands-Free / Headset / Bluetooth / Crusher /
-    AirPods are refused, and the system default (WAVE_MAPPER) is never used, because it can be the
-    headset. Virtual inputs (VB-Audio CABLE, Voicemeeter, Stereo Mix, Steam Streaming Mic) are not picked
-    automatically either: they carry the PC's own sound, not the room.
-  * optional, off by default (setting headset_mic): the Crusher's own mic, opened only once nothing has
-    played on the PC for 10 s and closed within about a second when something plays (Windows' audio
-    meters, read through ctypes COM). While it is open the Crusher is in call mode (HFP).
+  * the only mic is the Crusher's Hands-Free mic, read with winmm's waveIn through ctypes (no extra package
+    besides numpy). No other input is ever opened: not the PC's mics, not a webcam, not the system default.
+  * opening it puts the Crusher in call mode (HFP), so it is opened only once nothing has played on the PC
+    for 10 s and closed within about a second when anything plays (Windows' audio meters, read through
+    ctypes COM; a failed check counts as playing). While something plays, Adaptive keeps the last mode.
   * the Crusher is driven through crusher_win.py (RFCOMM channel 9 via Winsock).
   * a tiny local server on 127.0.0.1:8971 lets the Alt+Q ring (and crusher_win.py) turn it on, off, or
     tell it about a manual change.
@@ -22,11 +18,11 @@ Usage:
   python  crusher_adaptive_win.py on | off       # turn Adaptive on / off (on starts the daemon if needed)
   python  crusher_adaptive_win.py status         # JSON state: room dB, zone, what it chose
   python  crusher_adaptive_win.py manual         # what crusher_win.py anc|transparency calls
-  python  crusher_adaptive_win.py set sensitivity=60 conversation=on duck=off mic="Microphone Array" pause_min=10
-  python  crusher_adaptive_win.py mics           # the PC's microphones and which ones are safe to use
-  python  crusher_adaptive_win.py measure [secs] # print the room level and speech flag; the Crusher isn't touched
-  python  crusher_adaptive_win.py measure --headset [secs]   # the same through the Crusher's mic (call mode
-                                                             # while it runs; refused while something plays)
+  python  crusher_adaptive_win.py set sensitivity=60 conversation=on pause_min=10
+  python  crusher_adaptive_win.py mics           # the PC's inputs, and which one is the Crusher's (the only one used)
+  python  crusher_adaptive_win.py measure [secs] # the room level and speech flag through the Crusher's mic (call
+                                                 # mode while it runs; refused while something plays); the
+                                                 # Crusher's mode is not touched
   python  crusher_adaptive_win.py playing        # is anything playing on this PC right now (audio meters)
 
 Needs: numpy (pip install numpy) and CRUSHER_MAC set, like crusher_win.py.
@@ -54,22 +50,8 @@ PORT = 8971
 URL = f"http://127.0.0.1:{PORT}"
 SETTINGS_FILE = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "crossdevice-audio",
                              "crusher-adaptive.json")
-# a mic whose name says it is a headset or Bluetooth is never opened (it would switch the headset to calls)
-UNSAFE_MIC = re.compile(r"(?i)hands[- ]?free|headset|bluetooth|crusher|skullcandy|airpods|\bbt\b")
-# inputs that carry the PC's own sound, not the room: never picked automatically (still usable by name)
-VIRTUAL_MIC = re.compile(r"(?i)cable output|vb-audio|voicemeeter|stereo mix|what u hear|wave out|"
-                         r"steam streaming|virtual|loopback|nvidia broadcast")
-# the Crusher's own (Hands-Free) mic, for the headset_mic option only
+# the Crusher's own (Hands-Free) mic: the only input Adaptive ever opens
 CRUSHER_MIC = re.compile(os.environ.get("CRUSHER_MIC_NAME", r"(?i)crusher|skullcandy"))
-DUCK_STEPS = 4
-
-
-def mic_is_safe(name):
-    return not UNSAFE_MIC.search(name or "")
-
-
-def mic_is_virtual(name):
-    return bool(VIRTUAL_MIC.search(name or ""))
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -119,37 +101,19 @@ def winmm():
 
 
 def list_mics():
-    """[(device id, name, safe)] for every waveIn device. Names are cut at 31 characters by Windows."""
+    """[(device id, name)] for every waveIn device. Names are cut at 31 characters by Windows."""
     w = winmm()
     out = []
     for i in range(w.waveInGetNumDevs()):
         caps = WAVEINCAPSW()
         if w.waveInGetDevCapsW(i, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
-            out.append((i, caps.szPname, mic_is_safe(caps.szPname)))
+            out.append((i, caps.szPname))
     return out
-
-
-def pick_mic(want=""):
-    """The device to open: the first safe one whose name contains `want` (or any safe one)."""
-    mics = list_mics()
-    safe = [m for m in mics if m[2]]
-    if want:
-        hit = [m for m in safe if want.lower() in m[1].lower()]
-        if hit:
-            return hit[0]
-        if any(want.lower() in m[1].lower() for m in mics):
-            raise RuntimeError(f"'{want}' looks like a headset mic; as the room mic Adaptive never opens one "
-                               "(it means call mode). Use the headset_mic setting instead")
-    room = [m for m in safe if not mic_is_virtual(m[1])]
-    if not room:
-        raise RuntimeError("no room microphone on this PC (only headset or virtual inputs); plug in a USB mic "
-                           "or webcam, or turn on headset_mic")
-    return room[0]
 
 
 def crusher_mic():
     """The Crusher's Hands-Free mic as a waveIn device (id, name), or None."""
-    for i, name, _safe in list_mics():
+    for i, name in list_mics():
         if CRUSHER_MIC.search(name):
             return i, name
     return None
@@ -158,17 +122,12 @@ def crusher_mic():
 class WaveInCapture:
     NBUF, BUF_S = 8, 0.1
 
-    def __init__(self, want="", rate=ca.RATE, headset=False):
-        if headset:                                   # the headset_mic option: the Crusher's own mic
-            hit = crusher_mic()
-            if hit is None:
-                raise RuntimeError("the Crusher's Hands-Free mic is not in the PC's input list")
-            dev, name = hit
-            name += " (call mode)"
-        else:
-            dev, name, safe = pick_mic(want)
-            if not safe:                              # belt and braces: pick_mic only returns safe ones
-                raise RuntimeError("refusing a headset microphone")
+    def __init__(self, rate=ca.RATE):
+        hit = crusher_mic()                           # the Crusher's own mic, nothing else
+        if hit is None:
+            raise RuntimeError("the Crusher's Hands-Free mic is not in the PC's input list")
+        dev, name = hit
+        name += " (call mode)"
         self.label, self.w, self.rate = name, winmm(), rate
         fmt = WAVEFORMATEX(WAVE_FORMAT_PCM, 1, rate, rate * 2, 2, 16, 0)
         self.h = ctypes.c_void_p()
@@ -352,9 +311,6 @@ class CrusherLink:
         return ca.mode_of({"anc": bool(re.search(r"anc:\s*on", txt)),
                            "transparency": bool(re.search(r"transparency:\s*on", txt))})
 
-    def duck(self, on):
-        self.send([f"AT.VOLUME={'down' if on else 'up'},{DUCK_STEPS}"])
-
 
 def load_settings():
     try:
@@ -378,16 +334,15 @@ def save_settings(d):
 def make_runner():
     link = CrusherLink()
     return ca.AdaptiveRunner(
-        open_capture=lambda mic: WaveInCapture(mic), send=link.send, read_mode=link.read_mode,
-        connected=link.connected, has_level=link.has_level, gate=None, duck=link.duck,
-        load=load_settings, save=save_settings, log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True),
-        open_headset=lambda: WaveInCapture(headset=True), media_playing=media_playing)
+        open_headset=WaveInCapture, send=link.send, media_playing=media_playing, read_mode=link.read_mode,
+        connected=link.connected, has_level=link.has_level, load=load_settings, save=save_settings,
+        log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True))
 
 
 # ---------------------------------------------------------------------------------------------------
 # Local server (127.0.0.1 only) and CLI
 
-SETTABLE = ("enabled", "sensitivity", "conversation", "duck", "mic", "pause_min", "headset_mic")
+SETTABLE = ("enabled", "sensitivity", "conversation", "pause_min")
 
 
 def serve():
@@ -408,7 +363,7 @@ def serve():
             if self.path == "/state":
                 st = runner.state()
                 try:
-                    st["mics"] = [{"name": n, "safe": s, "virtual": mic_is_virtual(n)} for _, n, s in list_mics()]
+                    st["crusher_mic"] = (crusher_mic() or (None, None))[1]
                 except Exception:
                     pass
                 return self._j(200, st)
@@ -473,19 +428,21 @@ def _parse_kv(args):
     out = {}
     for a in args:
         k, _, v = a.partition("=")
-        if k in ("conversation", "duck", "enabled", "headset_mic"):
+        if k in ("conversation", "enabled"):
             out[k] = v.lower() in ("1", "on", "true", "yes")
         elif k in ("sensitivity", "pause_min"):
             out[k] = int(v)
-        elif k == "mic":
-            out[k] = v
     return out
 
 
-def measure(secs, headset=False):
-    if headset and media_playing():
-        sys.exit("something is playing on this PC; the headset mic is only opened while nothing plays")
-    cap = WaveInCapture(load_settings().get("mic", ""), headset=headset)
+def measure(secs):
+    try:
+        playing = media_playing()
+    except Exception:
+        playing = True                                # unknown counts as playing: never risk call mode
+    if playing:
+        sys.exit("something is playing on this PC; the Crusher's mic is only opened while nothing plays")
+    cap = WaveInCapture()
     print(f"listening on: {cap.label} (nothing is recorded)")
     m = ca.AmbientMeter()
     pol = ca.Policy(ca.Settings(load_settings()))
@@ -509,21 +466,17 @@ def main():
     if cmd == "serve":
         return serve()
     if cmd == "mics":
-        for i, name, safe in list_mics():
-            if CRUSHER_MIC.search(name):
-                what = "the Crusher's mic: only with headset_mic, while nothing plays (call mode)"
-            elif not safe:
-                what = "NEVER USED (headset / Bluetooth: call mode)"
-            elif mic_is_virtual(name):
-                what = "virtual input (the PC's own sound): only if you name it"
-            else:
-                what = "ok"
+        hit = crusher_mic()
+        for i, name in list_mics():
+            what = ("USED: the Crusher's mic, only while nothing plays (call mode)" if hit and i == hit[0]
+                    else "never used")
             print(f"{i}: {name}  {what}")
+        if hit is None:
+            print("the Crusher's mic is not in the list (is the Crusher connected to this PC?)")
         return
     if cmd == "measure":
-        hs = "--headset" in a
-        rest = [x for x in a[1:] if x != "--headset"]
-        return measure(float(rest[0]) if rest else 20, headset=hs)
+        rest = [x for x in a[1:] if x != "--headset"]          # --headset kept for old command lines
+        return measure(float(rest[0]) if rest else 20)
     if cmd == "playing":
         peaks = output_peaks()
         print(json.dumps({"playing": any(p > PLAYING_PEAK for p in peaks), "peaks": [round(p, 5) for p in peaks]}))

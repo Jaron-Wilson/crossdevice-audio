@@ -407,8 +407,8 @@ class AmbientMeter(val rate: Int = CA.RATE, val alpha: Double = 0.35) : Meter {
 // Deciding
 
 /** What the Crusher should be doing. mode: anc | transparency | off; level: transparency 0-100 or null;
- *  conv: chosen for a conversation; duck: lower the media volume while it lasts. */
-data class Target(val mode: String, val level: Int? = null, val conv: Boolean = false, val duck: Boolean = false) {
+ *  conv: chosen for a conversation. */
+data class Target(val mode: String, val level: Int? = null, val conv: Boolean = false) {
     fun label(): String {
         var name = when (mode) { "anc" -> "ANC"; "transparency" -> "Transparency"; else -> "Off" }
         if (mode == "transparency" && level != null) name += " $level"
@@ -423,8 +423,6 @@ class Settings(init: Map<String, Any?> = emptyMap()) {
             "enabled" to false,
             "sensitivity" to 50,         // 0-100: higher reacts to quieter noise
             "conversation" to true,      // conversation awareness
-            "duck" to false,             // lower the media volume while someone talks
-            "mic" to "",                 // kept for key parity with the laptop; the phone always uses its own mics
             "pause_min" to 10,           // after a manual change: pause this long; 0 = until turned back on
             "quiet_level" to 50,         // transparency level in a quiet room
             "moderate_level" to 20,      // transparency level in moderate, varying noise
@@ -433,7 +431,6 @@ class Settings(init: Map<String, Any?> = emptyMap()) {
             "dwell_s" to 12.0,           // and at least this long since the last switch
             "conv_return_s" to 5.0,      // back to the room's mode this long after the speech stops
             "min_gap_s" to 3.0,          // never more than one command batch per this
-            "headset_mic" to false,      // listen through the Crusher's own mic while nothing is playing
         )
         val LIMITS: Map<String, Pair<Double, Double>> = mapOf(
             "sensitivity" to (0.0 to 100.0), "pause_min" to (0.0 to 24.0 * 60), "quiet_level" to (0.0 to 100.0),
@@ -474,8 +471,6 @@ class Settings(init: Map<String, Any?> = emptyMap()) {
     val enabled get() = d["enabled"] as Boolean
     val sensitivity get() = d["sensitivity"] as Int
     val conversation get() = d["conversation"] as Boolean
-    val duck get() = d["duck"] as Boolean
-    val mic get() = d["mic"] as String
     val pauseMin get() = d["pause_min"] as Int
     val quietLevel get() = d["quiet_level"] as Int
     val moderateLevel get() = d["moderate_level"] as Int
@@ -484,7 +479,6 @@ class Settings(init: Map<String, Any?> = emptyMap()) {
     val dwellS get() = d["dwell_s"] as Double
     val convReturnS get() = d["conv_return_s"] as Double
     val minGapS get() = d["min_gap_s"] as Double
-    val headsetMic get() = d["headset_mic"] as Boolean
 }
 
 /**
@@ -542,7 +536,10 @@ class Policy(val s: Settings = Settings(), var hasLevel: Boolean = true) {
         else -> if (hasLevel) Target("transparency", s.moderateLevel) else Target("off")
     }
 
-    private fun convTarget() = Target("transparency", if (hasLevel) s.convLevel else null, conv = true, duck = s.duck)
+    private fun convTarget() = Target("transparency", if (hasLevel) s.convLevel else null, conv = true)
+
+    /** The conversation can no longer be heard (media plays): drop it, so desired() is the room's zone target. */
+    fun endConversation() { conv = false; speechRun = 0 }
 
     fun desired(): Target? = if (zone == null) null else if (conv) convTarget() else zoneTarget()
 
@@ -645,14 +642,12 @@ data class AdaptiveState(
  * Meter, policy, rate limit and read-back, with the platform's glue passed in:
  *   send(cmds)  sends AT commands; throws on failure
  *   hasLevel()  does this firmware answer the transparency level
- *   duck(on)    lowers / restores the media volume
  * The caller feeds audio blocks to [process] and mode read-backs to [observe].
  */
 class AdaptiveCore(
     val settings: Settings,
     private val send: (List<String>) -> Unit,
     private val hasLevel: () -> Boolean = { true },
-    private val duck: ((Boolean) -> Unit)? = null,
     private val clock: () -> Double,
     private val log: (String) -> Unit = {},
     val meter: Meter = AmbientMeter(),
@@ -665,7 +660,6 @@ class AdaptiveCore(
     val limiter = RateLimiter(settings.minGapS)
     @Volatile var last: Reading? = null; private set
     @Volatile var error = ""
-    private var ducked = false
     private var lastSend = Double.NEGATIVE_INFINITY
 
     /** Settings changed (from the UI). Picking Adaptive again clears a pause. */
@@ -688,19 +682,26 @@ class AdaptiveCore(
         return true
     }
 
-    /** The mic is closed or the Crusher went away: forget the room and put the volume back. */
+    /** The mic is closed or the Crusher went away: forget the room. */
     fun stopListening() {
         meter.reset()
         last = null
-        unduck()
     }
 
     /** Different mic, different levels: restart the meter but keep what was applied. */
     fun sourceChanged() { meter.reset(); last = null }
 
-    fun unduck() {
-        if (ducked && duck != null) runCatching { duck?.invoke(false) }.onFailure { log("crusher adaptive: restore volume: $it") }
-        ducked = false
+    /**
+     * Media plays, so nothing is heard: hold the last decided mode. Forget the meter; a conversation can no
+     * longer be heard, so it ends and the room's zone target is sent. Without a conversation nothing is sent.
+     */
+    fun holdForMedia(now: Double) {
+        meter.reset()
+        last = null
+        if (policy.conv || policy.applied?.conv == true) {     // (the second: a send that was rate limited or failed is retried)
+            policy.endConversation()
+            policy.desired()?.let { apply(it, now) }
+        }
     }
 
     /** Send one target (rate limited). Returns true if it was sent and committed. */
@@ -717,9 +718,6 @@ class AdaptiveCore(
             return false
         }
         limiter.mark(now)
-        if (target.duck != ducked && duck != null) {
-            try { duck?.invoke(target.duck); ducked = target.duck } catch (e: Exception) { log("crusher adaptive: volume: $e") }
-        }
         error = ""
         lastSend = now
         policy.committed(target, now)

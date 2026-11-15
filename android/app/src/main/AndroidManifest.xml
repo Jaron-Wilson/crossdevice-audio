@@ -118,7 +118,7 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
-        <!-- Crusher Adaptive: the phone's mic (or, if chosen, the Crusher's) hears the room only while it is on -->
+        <!-- Crusher Adaptive: the Crusher's own mic (Bluetooth call mode) hears the room, only while it is on and nothing has played for 10 s -->
         <service
             android:name=".CrusherAdaptiveService"
             android:exported="false"
@@ -168,6 +168,13 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Crusher Adaptive after a reboot: Android won't start a microphone service from boot, so this only posts "tap to resume" -->
+        <receiver android:name=".CrusherAdaptiveBoot" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 

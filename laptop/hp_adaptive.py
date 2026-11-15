@@ -1,24 +1,16 @@
 """Crusher Adaptive on the laptop: the PipeWire side of shared/crusher_adaptive.py.
 
-  * The mic is a laptop microphone only (hp_sound.sources(): alsa_input.*, never a monitor and never a
-    Bluetooth headset mic, which would switch the headphones to call mode). parec streams mono float32 at
-    16 kHz into memory; nothing is written anywhere.
-  * While the laptop's own speakers (an alsa_output.* sink) are playing, readings are ignored: the mic
-    would mostly hear the laptop itself. Music going to the Crusher over Bluetooth doesn't count.
-  * "Lower media while someone talks" turns the default output down with pactl and puts it back, unless
-    you changed the volume yourself meanwhile.
-  * Optional, off by default (setting headset_mic): the Crusher's own mic. Its card is switched to the
-    headset (HFP) profile only once no sink has played for 10 s, the bluez_input source is read the same
-    way, and the previous profile (A2DP) is put back when it closes, which happens within about a second of
-    any sink starting to play.
+  * The only mic is the Crusher's own. Its bluez card is switched to the headset (HFP) profile only once no
+    sink has played for 10 s, the bluez_input source is read with parec (mono float32 at 16 kHz, into
+    memory; nothing is written anywhere), and the previous profile (A2DP) is put back when it closes, which
+    happens within about a second of any sink starting to play. The laptop's own mics are never opened.
+  * While anything plays, Adaptive senses nothing and keeps the last mode it chose.
 """
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
-import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,41 +20,19 @@ for _p in (HERE, os.path.join(HERE, "..", "shared")):
 import crusher_adaptive as ca   # noqa: E402
 
 SETTINGS_FILE = os.path.expanduser("~/.config/headphone-panel/crusher-adaptive.json")
-DUCK_TO = 0.35          # of the current volume while someone talks
 
 
 def _run(cmd, timeout=4):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def mics():
-    """Microphones Adaptive may use: the laptop's own only (same rule as the sound viewer)."""
-    try:
-        import hp_sound
-        return [{"id": m["id"], "label": m["label"], "muted": m["muted"]} for m in hp_sound.sources()]
-    except Exception:
-        return []
-
-
-def safe_mic(name):
-    """The source to open: the chosen one if it is still a laptop mic, else the first laptop mic."""
-    ids = [m["id"] for m in mics()]
-    if name and name in ids:
-        return name
-    if not ids:
-        raise RuntimeError("no laptop microphone found (Adaptive never uses the headphones' mic)")
-    return ids[0]
-
-
 class ParecCapture:
-    def __init__(self, source, rate=ca.RATE):
-        if not source.startswith("alsa_input.") or source.endswith(".monitor"):
-            raise RuntimeError("only a laptop microphone can be used")
-        self.label = source
+    """parec on one PipeWire source, mono float32, into memory."""
+
+    def _start(self, source, rate, stream):
         self.proc = subprocess.Popen(
             ["parec", "-d", source, "--rate", str(rate), "--channels", "1", "--format", "float32le", "--raw",
-             "--latency-msec", "100", "--client-name", "Headphones panel",
-             "--stream-name", "Crusher Adaptive (levels only)"],
+             "--latency-msec", "100", "--client-name", "Headphones panel", "--stream-name", stream],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
 
     def read(self, n):
@@ -141,12 +111,11 @@ class HeadsetCapture(ParecCapture):
         if src is None:
             self._restore()
             raise RuntimeError("the Crusher's mic did not appear after switching to the headset profile")
+        if not src.startswith("bluez_input."):
+            self._restore()
+            raise RuntimeError("refusing a source that is not the Crusher's mic")
         self.label = "Crusher mic (call profile)"
-        self.proc = subprocess.Popen(
-            ["parec", "-d", src, "--rate", str(rate), "--channels", "1", "--format", "float32le", "--raw",
-             "--latency-msec", "100", "--client-name", "Headphones panel",
-             "--stream-name", "Crusher Adaptive, headset mic (levels only)"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        self._start(src, rate, "Crusher Adaptive, Crusher mic (levels only)")
 
     def _restore(self):
         if self.prev and not self.prev.startswith("headset-head-unit"):
@@ -170,57 +139,6 @@ def media_playing():
     return False
 
 
-def speakers_playing():
-    """True while one of the laptop's own outputs (speakers, its headphone jack, HDMI) is playing."""
-    try:
-        out = _run(["pactl", "list", "short", "sinks"], timeout=3).stdout
-    except Exception:
-        return False
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 5 and parts[1].startswith("alsa_output.") and parts[4].strip() == "RUNNING":
-            return True
-    return False
-
-
-class Ducker:
-    """Lower the default output's volume and put it back, unless it was changed in between."""
-
-    def __init__(self):
-        self.saved = None      # (original %, the % we set)
-        self.lock = threading.Lock()
-
-    @staticmethod
-    def _get():
-        out = _run(["pactl", "get-sink-volume", "@DEFAULT_SINK@"], timeout=3).stdout
-        m = re.search(r"(\d+)%", out)
-        return int(m.group(1)) if m else None
-
-    @staticmethod
-    def _set(pct):
-        _run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{int(pct)}%"], timeout=3)
-
-    def __call__(self, on):
-        with self.lock:
-            if on:
-                if self.saved:
-                    return
-                cur = self._get()
-                if cur is None:
-                    return
-                low = max(5, round(cur * DUCK_TO))
-                self._set(low)
-                self.saved = (cur, low)
-            else:
-                if not self.saved:
-                    return
-                orig, low = self.saved
-                self.saved = None
-                cur = self._get()
-                if cur is not None and abs(cur - low) <= 2:      # untouched since we lowered it
-                    self._set(orig)
-
-
 def load_settings():
     try:
         with open(SETTINGS_FILE) as f:
@@ -241,10 +159,9 @@ def save_settings(d):
 
 
 def make_runner(send, read_mode, connected, has_level, log=print, mac=""):
-    """The panel passes its Crusher functions; this adds the laptop's mic, gate, ducking and settings, and
-    (for the headset_mic option) the Crusher's own mic and the media-playing check."""
+    """The panel passes its Crusher functions; this adds the Crusher's mic, the media check and settings."""
+    def open_headset():
+        return HeadsetCapture(mac)
     return ca.AdaptiveRunner(
-        open_capture=lambda mic: ParecCapture(safe_mic(mic)),
-        send=send, read_mode=read_mode, connected=connected, has_level=has_level,
-        gate=speakers_playing, duck=Ducker(), load=load_settings, save=save_settings, log=log,
-        open_headset=(lambda: HeadsetCapture(mac)) if mac else None, media_playing=media_playing)
+        open_headset=open_headset, send=send, media_playing=media_playing, read_mode=read_mode,
+        connected=connected, has_level=has_level, load=load_settings, save=save_settings, log=log)
