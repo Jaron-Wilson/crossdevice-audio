@@ -1,13 +1,18 @@
 """Crusher Adaptive: an "Adaptive" noise mode for the Skullcandy Crusher ANC 2, done outside the headphones.
 
-The Crusher has no adaptive ANC and reports nothing it senses (docs/PROTOCOL.md), so this listens to the
-room with the HOST's own microphone (the laptop's or the PC's, never the headset's: opening a Bluetooth
-headset mic switches it to call mode) and moves the Crusher between its modes over the AT channel:
+The Crusher has no adaptive ANC and reports nothing it senses: its Airoha firmware answers none of the
+Airoha SDK's environment detection, full adaptive ANC or adaptive EQ queries (checked on the headset, see
+docs/PROTOCOL.md). So this listens to the room with the HOST's own microphone (the laptop's, the PC's or the
+phone's) and moves the Crusher between its modes over the AT channel:
 
     quiet room              -> Transparency at a moderate level
     moderate, varying noise -> Transparency at a lower level (Off if the firmware has no level)
     loud, or steady noise   -> ANC
     someone talking nearby  -> Transparency high (optionally lower the media), back ~5 s after the speech stops
+
+Optionally (setting headset_mic, off by default) it listens through the Crusher's own mic instead, but only
+while no media plays: a Bluetooth headset mic needs the call profile (HFP), which would turn music into mono
+call audio. As soon as media plays the headset mic is closed (back to A2DP) and the host mic takes over.
 
 Only numbers are kept: a loudness in dB and a few speech features per window. No audio is recorded, stored
 or sent anywhere; each block of samples is dropped as soon as it has been measured.
@@ -245,6 +250,7 @@ class Settings:
         "conversation": True,       # conversation awareness
         "duck": False,              # lower the media volume while someone talks
         "mic": "",                  # "" = automatic (the first safe built-in mic)
+        "headset_mic": False,       # listen through the headset's mic (call profile) while nothing plays
         "pause_min": 10,            # after a manual change: pause this long; 0 = until turned back on
         "quiet_level": 50,          # transparency level in a quiet room
         "moderate_level": 20,       # transparency level in moderate, varying noise
@@ -490,18 +496,28 @@ class AdaptiveRunner:
       gate()            -> True while the host's own speakers play (readings are ignored then)
       duck(on)          -> lower / restore the media volume
       load() / save(d)  -> settings persistence
+      open_headset()    -> like open_capture, for the Crusher's own mic (call profile); None = not offered
+      media_playing()   -> True while media plays on this host (the headset mic is never open then)
 
-    The mic is open only while Adaptive is on, not paused and the Crusher is connected.
+    The mic is open only while Adaptive is on, not paused and the Crusher is connected. With headset_mic on,
+    the headset's mic is used once nothing has played for HEADSET_IDLE_S, and closed within about a second
+    of media starting; the host mic is used in between.
     """
     BLOCK_S = 0.25
     MODE_CHECK_S = 30.0
     CONNECT_CHECK_S = 5.0
     GATE_CHECK_S = 3.0
     MANUAL_GRACE_S = 8.0      # a mode read this soon after our own send isn't taken as a manual change
+    MEDIA_CHECK_S = 1.0       # how often "is media playing?" is asked while headset_mic is on
+    HEADSET_IDLE_S = 10.0     # nothing played for this long before the headset mic is opened
+    HEADSET_RETRY_S = 60.0    # after the headset mic failed to open, use the host mic this long
 
     def __init__(self, open_capture, send, read_mode=None, connected=None, has_level=None, gate=None,
-                 duck=None, load=None, save=None, clock=time.monotonic, log=print, rate=RATE):
+                 duck=None, load=None, save=None, clock=time.monotonic, log=print, rate=RATE,
+                 open_headset=None, media_playing=None):
         self.open_capture, self.send = open_capture, send
+        self.open_headset = open_headset
+        self.media_playing = media_playing
         self.read_mode = read_mode or (lambda: None)
         self.connected = connected or (lambda: True)
         self.has_level = has_level or (lambda: True)
@@ -525,6 +541,12 @@ class AdaptiveRunner:
         self.last_conn = (-math.inf, False)
         self.last_gate = (-math.inf, False)
         self.mic_open = ""
+        self.source = ""              # what the open capture is: "host" | "headset" | ""
+        self.last_media = (-math.inf, True)
+        self.idle_since = None        # media stopped playing at this time (None = playing or unknown)
+        self.headset_fail_until = -math.inf
+        self.headset_error = ""
+        self.grace_until = -math.inf  # no manual-change detection before this (after a call-profile spell)
         self.thread = None
 
     # ---- control ----
@@ -541,8 +563,13 @@ class AdaptiveRunner:
                     self._stop_listening()
                     self._unduck()
                     self.policy.reset()
-            if "mic" in kw and self.cap is not None:
+            if ("mic" in kw or "headset_mic" in kw) and self.cap is not None:
                 self._close()             # reopen on the new mic
+                if self.meter is not None:
+                    self.meter.reset()
+            if "headset_mic" in kw:
+                self.headset_fail_until = -math.inf
+                self.headset_error = ""
             self._save(self.settings.as_dict())
         self.wake.set()
         return self.state()
@@ -576,6 +603,10 @@ class AdaptiveRunner:
                 "enabled": self.settings.enabled,
                 "listening": self.cap is not None,
                 "mic": self.mic_open,
+                "source": self.source,
+                "headset_offered": self.open_headset is not None,
+                "headset_error": self.headset_error,
+                "media_playing": bool(self.last_media[1]) if self.settings.headset_mic else None,
                 "status": self.status,
                 "error": self.error,
                 "ambient_db": round(r.level, 1) if r else None,
@@ -596,6 +627,9 @@ class AdaptiveRunner:
     def _close(self):
         c, self.cap = self.cap, None
         self.mic_open = ""
+        if self.source == "headset":
+            self.grace_until = self.clock() + self.MANUAL_GRACE_S
+        self.source = ""
         if c is not None:
             try:
                 c.close()
@@ -625,6 +659,32 @@ class AdaptiveRunner:
                 v = False
             setattr(self, attr, (now, v))
         return v
+
+    def _media(self, now):
+        """Is media playing (cached for MEDIA_CHECK_S)? An error counts as playing: never risk call mode."""
+        t, v = self.last_media
+        if now - t >= self.MEDIA_CHECK_S:
+            try:
+                v = bool(self.media_playing()) if self.media_playing else True
+            except Exception:
+                v = True
+            self.last_media = (now, v)
+            if v:
+                self.idle_since = None
+            elif self.idle_since is None:
+                self.idle_since = now
+        return v
+
+    def want_source(self, now):
+        """'headset' when headset_mic is on, the headset mic is offered, and nothing has played for
+        HEADSET_IDLE_S (and it didn't just fail); else 'host'."""
+        if not (self.settings.headset_mic and self.open_headset is not None):
+            return "host"
+        if self._media(now) or now < self.headset_fail_until:
+            return "host"
+        if self.idle_since is None or now - self.idle_since < self.HEADSET_IDLE_S:
+            return "host"
+        return "headset"
 
     def apply(self, target, now):
         """Send one target (rate limited). Returns True if it was sent and committed."""
@@ -660,7 +720,8 @@ class AdaptiveRunner:
             self.meter = AmbientMeter(self.rate)
         for r in self.meter.feed(block):
             now = self.clock() if now is None else now
-            r.held = self._cached("last_gate", self.gate, self.GATE_CHECK_S, now)
+            # the host's speakers only matter to the host mic; the headset mic sits on your head
+            r.held = (self.source != "headset") and self._cached("last_gate", self.gate, self.GATE_CHECK_S, now)
             self.last = r
             t = self.policy.tick(r, now)
             if t is not None:
@@ -671,6 +732,8 @@ class AdaptiveRunner:
         a = self.policy.applied
         if mode is None or a is None or now - self.last_send < self.MANUAL_GRACE_S:
             return False
+        if self.source == "headset" or now < self.grace_until:
+            return False          # the call profile can change what the headset reports
         if mode != a.mode:
             self.manual("changed on the headset or elsewhere")
             return True
@@ -696,16 +759,42 @@ class AdaptiveRunner:
                 self.policy.reset()
                 self.status = "waiting for the Crusher to connect"
                 return 2.0
+            want = self.want_source(now)
+            if self.cap is not None and self.source != want:
+                self._close()                 # media started (headset -> host) or went quiet (host -> headset)
+                if self.meter is not None:
+                    self.meter.reset()        # another mic, other levels: start the measurement over
+                self.last = None
             if self.cap is None:
-                try:
-                    self.cap = self.open_capture(self.settings.mic)
-                    self.mic_open = getattr(self.cap, "label", "") or self.settings.mic or "auto"
-                    self.error = ""
-                except Exception as e:
-                    self.cap = None
-                    self.status = "no microphone"
-                    self.error = str(e)
-                    return 5.0
+                if want == "headset":
+                    try:
+                        self.cap = self.open_headset()
+                        self.source = "headset"
+                        self.mic_open = getattr(self.cap, "label", "") or "headset mic"
+                        self.headset_error = ""
+                    except Exception as e:
+                        self.cap = None
+                        self.headset_error = str(e)
+                        self.headset_fail_until = now + self.HEADSET_RETRY_S
+                        self.log(f"crusher adaptive: headset mic: {e}")
+                        want = "host"
+                if self.cap is None:
+                    try:
+                        self.cap = self.open_capture(self.settings.mic)
+                        self.source = "host"
+                        self.mic_open = getattr(self.cap, "label", "") or self.settings.mic or "auto"
+                        self.error = ""
+                    except Exception as e:
+                        self.cap = None
+                        self.source = ""
+                        self.error = str(e)
+                        if self.settings.headset_mic and self.open_headset is not None:
+                            self.status = ("waiting: media is playing, and the headset mic is only used while "
+                                           "nothing plays" if self.last_media[1] else
+                                           "waiting for 10 s of nothing playing (the headset mic)")
+                            return 1.0
+                        self.status = "no microphone"
+                        return 5.0
             cap = self.cap
         block = cap.read(int(self.rate * self.BLOCK_S))      # blocks ~0.25 s, outside the lock
         with self.lock:
@@ -718,7 +807,9 @@ class AdaptiveRunner:
             now = self.clock()
             self.process(block, now)
             if self.last is None:
-                self.status = "listening..."
+                self.status = "listening..." + (" (headset mic)" if self.source == "headset" else "")
+            elif self.source == "headset":
+                self.status = "adapting (headset mic, nothing playing)"
             elif self.last.held:
                 self.status = "holding: the computer's speakers are playing"
             else:

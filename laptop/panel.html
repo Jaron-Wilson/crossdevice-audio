@@ -46,9 +46,10 @@ select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:
   <div class=tg><div>Conversation awareness<small>Someone talking nearby: Transparency up, back about 5 s after they stop.</small></div><div class=sw id=ad_conv onclick="adset({conversation:!this.classList.contains('on')})"></div></div>
   <div class=tg><div>Lower media while they talk</div><div class=sw id=ad_duck onclick="adset({duck:!this.classList.contains('on')})"></div></div>
   <div class=row style="margin-top:8px"><span>Mic</span><select id=ad_mic onchange="adset({mic:this.value})"></select></div>
+  <div class=tg id=ad_hs_row><div>Use the headset mic when nothing is playing<small>Call quality while it listens: the Crusher switches to its call profile (HFP) whenever nothing has played for 10 s, and back to music quality within about a second when anything plays. Off by default.</small></div><div class=sw id=ad_hs onclick="adset({headset_mic:!this.classList.contains('on')})"></div></div>
   <div class=row style="margin-top:8px"><span>After a manual change</span><select id=ad_pause onchange="adset({pause_min:+this.value})">
    <option value=5>pause 5 min</option><option value=10>pause 10 min</option><option value=30>pause 30 min</option><option value=0>stay off until I pick Adaptive</option></select></div>
-  <div class=note>Uses the laptop's own microphone, never the Crusher's (that would switch it to call mode). It adapts to the room around the laptop, not to your ear. Only loudness numbers are kept; no sound is recorded or sent anywhere.</div>
+  <div class=note>Uses the laptop's own microphone. The Crusher's mic is used only if you turn on the headset mic above, and only while nothing plays (it needs call mode). With the laptop mic it adapts to the room around the laptop, not to your ear. Only loudness numbers are kept; no sound is recorded or sent anywhere.</div>
   <div class=row style="margin-top:8px"><button class=small onclick="adset({enabled:false})">Turn Adaptive off</button></div>
  </div>
  <div class=card><div class=k>Sensory bass (haptic)</div>
@@ -255,7 +256,10 @@ function renderAd(ad){AD=ad||{};const av=!!AD.available;$('cr_ad').className=av?
  $('ad_now').textContent=AD.target?'now: '+AD.target.label:'';
  $('ad_st').textContent=(AD.status||'')+(AD.error?' · '+AD.error:'')+(AD.thresholds?` · quiet below ${Math.round(AD.thresholds.quiet_max)} dB, loud above ${Math.round(AD.thresholds.loud_min)} dB`:'');
  const st=AD.settings||{};if(document.activeElement!==$('ad_sens'))$('ad_sens').value=st.sensitivity;
- sw('ad_conv',!!st.conversation);sw('ad_duck',!!st.duck);$('ad_pause').value=String(st.pause_min);
+ sw('ad_conv',!!st.conversation);sw('ad_duck',!!st.duck);sw('ad_hs',!!st.headset_mic);$('ad_pause').value=String(st.pause_min);
+ $('ad_hs_row').style.display=AD.headset_offered===false?'none':'';
+ if(AD.source==='headset')$('ad_st').textContent='listening with the Crusher mic (call profile) · '+$('ad_st').textContent;
+ if(AD.headset_error)$('ad_st').textContent+=' · headset mic: '+AD.headset_error;
  if(AD.mics){const m=$('ad_mic'),cur=st.mic||'';m.innerHTML='<option value="">automatic (laptop mic)</option>'+AD.mics.map(x=>`<option value="${x.id}">${x.label}${x.muted?' (muted)':''}</option>`).join('');m.value=cur;}
  clearTimeout(adT);if(!document.hidden&&!AD.paused)adT=setTimeout(adPoll,1500);}
 async function adPoll(){try{const ad=await (await fetch('/api/crusher/adaptive')).json();renderAd(ad);}catch(e){}}

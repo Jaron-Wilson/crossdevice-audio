@@ -679,7 +679,7 @@ try:
     ADAPTIVE = hp_adaptive.make_runner(
         send=_cr_send, read_mode=_cr_mode_now, connected=crusher_connected,
         has_level=lambda: "transparency_level" in (crusher_extras() or {}),
-        log=lambda m: print(m, flush=True)).start()
+        log=lambda m: print(m, flush=True), mac=CR_MAC).start()
     ADAPTIVE_ERR = "" if ADAPTIVE.state()["available"] else "numpy is not installed"
 except Exception as e:
     ADAPTIVE = None; ADAPTIVE_ERR = str(e)
@@ -780,7 +780,7 @@ class H(BaseHTTPRequestHandler):
                 j=json.loads(body or "{}")
                 if j.get("mic") and j["mic"] not in [m["id"] for m in hp_adaptive.mics()]:
                     return self._s(400,json.dumps({"error":"unknown microphone"}))
-                keep={k:v for k,v in j.items() if k in ("enabled","sensitivity","conversation","duck","mic","pause_min")}
+                keep={k:v for k,v in j.items() if k in ("enabled","sensitivity","conversation","duck","mic","pause_min","headset_mic")}
                 ADAPTIVE.set(**keep)
                 return self._s(200,json.dumps(adaptive_state(full=True)))
             if self.path=="/api/crusher/setting":
