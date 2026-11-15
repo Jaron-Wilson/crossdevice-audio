@@ -128,7 +128,8 @@ audio arrives within 5 s it stops and says so, and it never falls back to anothe
 known that reports an ambient noise *level*: Adaptive Audio measures it inside the AirPods and acts on it.
 
 The Crusher reports nothing it senses over AT: `AT.UIAUDIO?` and its unsolicited `.UIAUDIO` lines give only the
-mode, `AT.CRUSHER?` the bass. The Airoha SDK inside Skull-iQ has an "environment detection" call (stationary
+mode, `AT.CRUSHER?` the bass. That is why Crusher Adaptive (README) listens with the computer's own mic and only
+sends the mode commands above plus `AT.UIAUDIO=transparency,,<n>` (and `AT.VOLUME` on Windows for "lower media"). The Airoha SDK inside Skull-iQ has an "environment detection" call (stationary
 noise per side, ANC gains), but Skull-iQ never calls it, and it would go over Airoha's RACE transport, not AT.
 
 ### Ear detection: left and right (Android 1.9.0)
@@ -218,9 +219,11 @@ they are stored.
 | POST | `/api/sound/stop` | | Stop listening now |
 | POST | `/api/sound/unmute` | source id | Unmute that microphone |
 | POST | `/api/sound/notch` | `{"kind":"mic"\|"output","freqs":[60,120]}` | Notch filter on the laptop mic (new default input) or in front of the default output; `[]` turns it off and restores the old default |
-| GET | `/api/caps` | | `{crusher:bool, airpods:bool, eq:bool}`. Fast; the rings poll it |
+| GET | `/api/caps` | | `{crusher:bool, airpods:bool, crusher_adaptive:bool, eq:bool}`. Fast; the rings poll it |
 | POST | `/api/airpods/mode` | `off\|anc\|transparency\|adaptive` | 503 if the AirPods aren't connected |
-| POST | `/api/crusher/mode` | `anc\|transparency\|off` | |
+| POST | `/api/crusher/mode` | `anc\|transparency\|off\|adaptive` | `adaptive` turns Crusher Adaptive on (and ends a pause). The other three are a manual change: they pause Adaptive. So does setting `transparency_level` |
+| GET | `/api/crusher/adaptive` | | `{available, enabled, paused, paused_for_s, listening, mic, status, error, ambient_db, raw_db, zone:quiet\|moderate\|loud, steady, speech, held, conversation, target:{mode,level,label}, thresholds:{quiet_max,loud_min}, settings, mics}`. Also in `/api/state` as `crusher.adaptive` (without `mics`) |
+| POST | `/api/crusher/adaptive` | `{"enabled":true,"sensitivity":60,"conversation":true,"duck":false,"mic":"","pause_min":10}` | Any subset. `mic` must be one of `mics` (`""` = automatic); `pause_min` 0 = until Adaptive is picked again |
 | POST | `/api/crusher/bass` | `0-10` | |
 | POST | `/api/handoff` | `phone\|laptop` | Who has the AirPods. The laptop steps aside for the phone |
 | GET | `/api/track` | | Last seen on the laptop: `{airpods:{connected, last_connected, events:[{t, event:connected\|disconnected, where:"laptop"}]}, crusher:{…}}`. Times are Unix seconds. Polled from BlueZ every 30 s, last 50 per device, stored in `~/.local/state/headphone-panel/track.json` |
@@ -242,3 +245,14 @@ What the panel does instead (`laptop/hp_sound.py`):
 - **Reduce it**: outside sound -> only the AirPods' ANC (buttons for Noise Cancellation / Adaptive at the
   strongest setting; best on steady low sounds). Sound through the laptop -> a PipeWire `bq_notch` filter
   chain on the laptop mic or on the output (optionally with 2x and 3x harmonics for hum).
+
+## Crusher Adaptive on Windows (local API, 127.0.0.1:8971)
+
+`windows/crusher_adaptive_win.py serve` listens on loopback only.
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/state` | | The same fields as the panel's `/api/crusher/adaptive`, with `mics:[{name, safe}]` |
+| POST | `/enable` / `/disable` | | Turn it on (ends a pause) or off (closes the mic, puts the volume back) |
+| POST | `/manual` | | A mode was changed by hand: pause. `crusher_win.py anc\|transparency\|transparency-level` sends it |
+| POST | `/set` | `{"sensitivity":60,"conversation":true,"duck":false,"mic":"Webcam","pause_min":10}` | `mic` is part of a device name; a headset or Bluetooth mic is refused |

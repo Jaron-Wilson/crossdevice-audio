@@ -654,6 +654,45 @@ def sound_state():
             "sources": hp_sound.sources(), "listening": SOUND.source, "bins": SOUND.bin_centers(),
             "notch": {k: n.state() for k, n in NOTCH.items()}}
 
+# ---- Crusher Adaptive: the laptop mic hears the room, the Crusher's mode follows (hp_adaptive.py,
+# shared/crusher_adaptive.py). Off until turned on; the mic is open only while it runs.
+def _cr_send(cmds):
+    with CR_LOCK: rs = cr_at_each(cmds)
+    bad = [c for c, r in zip(cmds, rs) if "ERROR" in r or not r.strip()]
+    if bad: raise RuntimeError("Crusher refused " + ", ".join(bad))
+    kw = {}
+    for c in cmds:
+        if c == "AT.UIAUDIO=anc,on": kw.update(anc=True, transparency=False)
+        elif c == "AT.UIAUDIO=transparency,on": kw.update(anc=False, transparency=True)
+        elif c == "AT.UIAUDIO=anc,off": kw["anc"] = False
+        elif c == "AT.UIAUDIO=transparency,off": kw["transparency"] = False
+        elif c.startswith("AT.UIAUDIO=transparency,,"):
+            if CR_EXTRAS["v"] is not None: CR_EXTRAS["v"]["transparency_level"] = int(c.rsplit(",", 1)[1])
+    crusher_cache_set(**kw)
+def _cr_mode_now():
+    v = crusher_state_live()
+    if not v.get("online"): return None
+    if CR_CACHE["v"]: CR_CACHE.update(t=time.time(), v={**CR_CACHE["v"], **v})
+    return hp_adaptive.ca.mode_of(v)
+try:
+    import hp_adaptive
+    ADAPTIVE = hp_adaptive.make_runner(
+        send=_cr_send, read_mode=_cr_mode_now, connected=crusher_connected,
+        has_level=lambda: "transparency_level" in (crusher_extras() or {}),
+        log=lambda m: print(m, flush=True)).start()
+    ADAPTIVE_ERR = "" if ADAPTIVE.state()["available"] else "numpy is not installed"
+except Exception as e:
+    ADAPTIVE = None; ADAPTIVE_ERR = str(e)
+def adaptive_state(full=False):
+    if not ADAPTIVE: return {"available": False, "error": ADAPTIVE_ERR}
+    st = ADAPTIVE.state()
+    if not st["available"]: st["error"] = ADAPTIVE_ERR
+    if full: st["mics"] = hp_adaptive.mics()
+    return st
+def crusher_manual():
+    """A Crusher mode was picked by hand: Adaptive steps aside (for its pause time)."""
+    if ADAPTIVE: ADAPTIVE.manual("changed in the panel")
+
 HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html"), encoding="utf-8").read()
 
 class H(BaseHTTPRequestHandler):
@@ -686,15 +725,19 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/" : return self._s(200,HTML,"text/html; charset=utf-8")
         if self.path=="/api/caps":
             # which controls exist right now: the flick ring hides the rest
-            return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online,
+            cc=crusher_connected()
+            return self._s(200,json.dumps({"crusher":cc,"airpods":AP.online,
+                                           "crusher_adaptive":bool(cc and ADAPTIVE and adaptive_state()["available"]),
                                            "eq":bool(EQ and EQ.available())}))
         if self.path=="/api/state":
-            return self._s(200,json.dumps({"crusher":{**crusher_state(),"rumble":rumble_state()},"airpods":AP.state(),"eq":eq_state(),
+            return self._s(200,json.dumps({"crusher":{**crusher_state(),"rumble":rumble_state(),"adaptive":adaptive_state()},"airpods":AP.state(),"eq":eq_state(),
                                            "spatial":spatial_state(),"rumble":rumble_state()}))
         if self.path=="/api/spatial":
             return self._s(200,json.dumps(spatial_state()))
         if self.path=="/api/track":
             return self._s(200,json.dumps(track_state()))
+        if self.path=="/api/crusher/adaptive":
+            return self._s(200,json.dumps(adaptive_state(full=True)))
         if self.path=="/api/eq":
             return self._s(200,json.dumps(eq_state()))
         self._s(404,"{}")
@@ -702,6 +745,12 @@ class H(BaseHTTPRequestHandler):
         n=int(self.headers.get("content-length",0)); body=self.rfile.read(n).decode().strip()
         try:
             if self.path=="/api/crusher/mode":
+                if body=="adaptive":
+                    if not ADAPTIVE or not adaptive_state()["available"]:
+                        return self._s(503,json.dumps({"error":"Adaptive unavailable: "+(ADAPTIVE_ERR or "?")}))
+                    return self._s(200,json.dumps(ADAPTIVE.set(enabled=True)))
+                if body not in ("anc","transparency","off"): return self._s(400,json.dumps({"error":"unknown mode"}))
+                crusher_manual()
                 with CR_LOCK:
                     if body=="anc": cr_at(["AT.UIAUDIO=transparency,off","AT.UIAUDIO=anc,on"]); crusher_cache_set(anc=True,transparency=False)
                     elif body=="transparency": cr_at(["AT.UIAUDIO=transparency,on"]); crusher_cache_set(anc=False,transparency=True)
@@ -726,8 +775,17 @@ class H(BaseHTTPRequestHandler):
                 track_clear(); return self._s(200,json.dumps(track_state()))
             if self.path=="/api/airpods/refresh":
                 return self._s(200 if AP.refresh() else 503,json.dumps({"reported":AP.reported()}))
+            if self.path=="/api/crusher/adaptive":
+                if not ADAPTIVE: return self._s(503,json.dumps({"error":ADAPTIVE_ERR}))
+                j=json.loads(body or "{}")
+                if j.get("mic") and j["mic"] not in [m["id"] for m in hp_adaptive.mics()]:
+                    return self._s(400,json.dumps({"error":"unknown microphone"}))
+                keep={k:v for k,v in j.items() if k in ("enabled","sensitivity","conversation","duck","mic","pause_min")}
+                ADAPTIVE.set(**keep)
+                return self._s(200,json.dumps(adaptive_state(full=True)))
             if self.path=="/api/crusher/setting":
                 j=json.loads(body or "{}")
+                if j.get("name")=="transparency_level": crusher_manual()
                 crusher_setting(j.get("name"), j.get("value"))
                 return self._s(200,"{}")
             if self.path in ("/api/eq","/api/eq/cycle"):
@@ -778,6 +836,7 @@ class H(BaseHTTPRequestHandler):
 if __name__=="__main__":
     import signal, sys
     def cleanup():
+        if ADAPTIVE: ADAPTIVE.shutdown()   # close the mic, put the media volume back
         if SOUND: SOUND.stop(wait=True)
         for n in NOTCH.values(): n.shutdown()
         if SPATIAL: SPATIAL.shutdown()

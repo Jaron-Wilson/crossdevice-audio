@@ -22,13 +22,14 @@ It doesn't need an iPhone, a kernel driver, a Secure Boot change, a USB dongle o
 
 | Where | How you use it | What you get |
 |---|---|---|
-| **Windows PC** | `Alt+Q`, flick up, then flick out | Volume, media keys and Crusher modes and bass. AirPods modes go through the laptop. |
+| **Windows PC** | `Alt+Q`, flick up, then flick out | Volume, media keys and Crusher modes (including Crusher Adaptive) and bass. AirPods modes go through the laptop. |
 | **Linux laptop** | `Alt+Q`, flick up, then flick out | The same ring, plus an audio output switcher. The laptop is what talks to the AirPods. |
 | **Web panel** | `https://<laptop>:8970` over Tailscale | Every control with live state and AirPods battery. |
 | **Android widget** | Home screen | AirPods modes and battery straight from the phone, with no laptop or Tailscale needed. When the AirPods aren't on the phone it works through the laptop. |
 
 The ring only shows controls that the connected headphones can actually do. AirPods get Adaptive, the
-Crusher gets Bass, and with nothing connected only volume and track controls are left:
+Crusher gets Bass (and Adaptive too, once [Crusher Adaptive](#crusher-adaptive-mode) is set up on that
+computer), and with nothing connected only volume and track controls are left:
 
 | Both connected | AirPods only | Crusher only |
 |---|---|---|
@@ -110,6 +111,7 @@ this broadcast, so battery shows no matter which device is playing.
 | Conversational Awareness, Personalized Volume, ear detection, one-bud ANC, "Off" in press and hold | AAP `0x28`, `0x26`, `0x0A`, `0x1B`, `0x34` | | Panel, Android app |
 | Press-and-hold cycle (which modes) | AAP `0x1A` | | Panel, Android app |
 | Sensory bass level and on/off | | `AT.CRUSHER` | Panel, Android app, `crusher_win.py`, ring |
+| Adaptive mode (the computer's mic hears the room and picks the mode) | (built in) | [Crusher Adaptive](#crusher-adaptive-mode): `AT.UIAUDIO` mode and transparency level | Panel, ring, `crusher_adaptive_win.py` |
 | Transparency level, hear-through on calls / when paused | | `AT.UIAUDIO=transparency,,n`, `atoncall`, `atonpause` (shown only if the firmware answers) | Panel, Android app, `crusher_win.py` |
 | Firmware feature flags (Tile Find Me, Spotify One Touch, Remote Control, Latency Mode) | | `AT.FEATURE=info`, read-only | Panel |
 
@@ -134,6 +136,102 @@ mic or out of the laptop's output. Both are off until you turn them on.
 the AirPods between Adaptive levels as you walk, drive or sit still.
 
 All three use `shared/eq_presets.json`, so a preset sounds the same everywhere.
+
+## Crusher Adaptive mode
+
+AirPods Pro 2 have an Adaptive mode that listens with their own mics and blends noise cancelling and
+transparency. The Crusher ANC 2 has nothing like it, and it reports nothing it senses. Crusher Adaptive
+does the same job outside the headphones: the **computer the Crusher is connected to** listens to the room
+with **its own microphone** and moves the Crusher between its modes over the AT channel.
+
+| The room | The Crusher |
+|---|---|
+| Quiet | Transparency at a moderate level (50) |
+| Some noise that comes and goes (people, a cafe) | Transparency, lower (20). Off if the firmware has no transparency level |
+| Loud, or a steady noise (fan, engine, air conditioning) | ANC |
+| Someone talking nearby (Conversation awareness, on by default) | Transparency high (100), optionally the media turned down; back to the room's mode about 5 s after the talking stops |
+
+```mermaid
+flowchart TB
+  mic["Laptop or PC microphone<br/>(never the headset's)"] --> meter["Every 0.5 s: room level<br/>(A-weighted dB over 1 s, smoothed)<br/>steady? voices nearby?"]
+  meter --> gate{"Computer's own speakers playing?"}
+  gate -- yes --> hold["Ignore the reading"]
+  gate -- no --> pol["Policy: quiet / some noise / loud<br/>with 4 dB hysteresis"]
+  pol --> wait{"Held 4 s and 12 s<br/>since the last switch?"}
+  wait -- no --> pol
+  wait -- yes --> rate["At most one command batch per 3 s"]
+  talk["Voices for about 1 s"] --> rate
+  rate --> at["AT.UIAUDIO over RFCOMM 9"] --> crusher(["Crusher ANC 2"])
+  manual["You pick ANC / Transparency / Off,<br/>or press the headset's button"] --> pause["Adaptive pauses 10 min<br/>(or until you pick Adaptive again)"]
+```
+
+**Where it runs**
+
+- **Laptop (web panel).** An *Adaptive* button next to ANC / Transparency / Off. The card under it shows the
+  room level in dB, quiet / some noise / loud, steady, voices, and what it chose, live. Settings: sensitivity,
+  conversation awareness, lower media while they talk, which mic, and how long a manual change pauses it.
+  The mic is a laptop microphone only (the same rule as the sound viewer: `alsa_input.*`, never a monitor or
+  a Bluetooth mic), read by `parec` at 16 kHz. While the laptop's own speakers, jack or HDMI play, readings
+  are ignored, so it doesn't adapt to itself; music going to the Crusher doesn't count. "Lower media" turns
+  the default output down to about a third and puts it back, unless you changed the volume in between.
+  The ring's *Adaptive* wedge goes through the panel.
+- **Windows PC.** `windows/crusher_adaptive_win.py` runs as a small background process with a local API on
+  `127.0.0.1:8971`. The ring's *Adaptive* wedge runs `crusher_adaptive_win.py on`, which starts it if needed.
+  The mic is read with winmm (`waveIn`) and must not look like a headset: any input named Hands-Free,
+  Headset, Bluetooth, Crusher or AirPods is never opened, and neither is the Windows default (it can be the
+  headset). A desktop without a built-in mic needs a webcam or USB mic. "Lower media" uses the Crusher's own
+  volume (`AT.VOLUME`), if the firmware answers it. `crusher_adaptive_win.py measure` prints the room level
+  and the voices flag without touching the Crusher, to pick a sensitivity.
+- **Android.** Not yet: on the phone the Crusher still has Smart adaptive (motion sensors). The same policy
+  would fit the app (the phone's own mic through `AudioRecord`, a microphone foreground service while it
+  runs); see *What's left* below.
+
+**Never call mode.** It never opens the Crusher's microphone or any Bluetooth headset mic, because that
+switches the headset to HFP and drops the music to call quality. Music stays on A2DP the whole time.
+
+**Privacy.** The audio is measured in memory a quarter second at a time and dropped. What is kept is a
+handful of numbers: the level in dB, and for the voices check the voice-band level and whether a pitch was
+found, per 20 ms, for the last 2 s. Nothing is recorded, written to disk or sent anywhere; the settings file
+holds only the settings. The mic is open only while Adaptive is on, not paused, and the Crusher is
+connected to that computer, so the system's "mic in use" indicator shows exactly when it listens.
+
+**How it decides.**
+- *Level*: A-weighted RMS over 1 s windows (a reading every 0.5 s), in dB relative to the mic's full scale,
+  smoothed. *Steady*: the last 6 s vary by 2 dB or less (and stop being steady above 3 dB).
+- *Voices nearby*: over the last 2 s, most of the energy is in 300 to 3400 Hz, its level swings by several dB
+  at syllable rate (2 to 8 Hz), and at least a fifth of the louder 20 ms frames have a voice pitch (80 to
+  500 Hz). Fans, hum, hiss and typing fail one of these. It doesn't recognise words or who is talking;
+  music with singing can count as voices.
+- *Never flapping*: the quiet / some noise / loud thresholds have 4 dB of hysteresis, a new situation must
+  last 4 s, and there are at least 12 s between switches. Conversation switches skip the waiting (that is
+  the point of them) but still go through the limit of one command batch per 3 s. Voices don't move the
+  room's level class, so talking in a quiet room doesn't count as noise.
+- *Your choice wins*: picking ANC, Transparency or Off (panel, ring, `crusher_win.py`) or the transparency
+  level pauses Adaptive for 10 minutes (5, 30, or "until I pick Adaptive" in the settings). Every 30 s it
+  reads the mode back, so a change with the headset's button pauses it too.
+- *Sensitivity* (0 to 100, default 50) moves both thresholds by up to 10 dB. At 50, quiet is under -50 dB
+  and loud is over -36 dB (A-weighted, full scale). Laptop mics differ, so watch the live dB in the panel
+  (or `measure` on the PC) in a quiet room and in a noisy one, and move the slider until the zones match.
+
+**Limits, honestly.**
+- It adapts to the room around the computer, not to what reaches your ear. Walk away from the laptop and
+  it is listening to the wrong room.
+- The Crusher has three modes and a transparency level; there is no ANC strength over AT, so "more noise
+  cancelling" is a switch to ANC, not a blend. Each switch takes the Crusher a moment and may click.
+- Levels are uncalibrated (dB relative to the mic's full scale), which is why there is a sensitivity slider.
+- On Windows it can't tell when the PC's own speakers play (it assumes the Crusher is the output).
+- If the computer and the Crusher both try RFCOMM at the same moment (for example `crusher_win.py` while
+  Adaptive switches), one of them can fail and is retried on the next pass.
+
+**What's left.** Android: the meter and the policy are about 430 lines of Python with no platform code, so a
+Kotlin port (`CrusherAdaptive.kt` plus a unit test like `SmartMachineTest`) can follow `SmartMachine`'s
+pattern, with the phone mic in a microphone foreground service and `CrusherDirect` for the AT commands.
+
+Run the tests (no hardware; the measuring tests need numpy):
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 ## Live Translation (Android 1.3.0)
 
@@ -237,7 +335,9 @@ and nothing uses call (HFP) mode except Live Translation (see below).
 | Hand-off | Phone and laptop | none | Only matters when a laptop is used too |
 
 **Crusher "adaptive".** The Crusher ANC 2 has no adaptive ANC and reports nothing it senses: over AT it only
-answers its mode and bass. So Crusher automation is Smart adaptive (phone motion sensors), not sound.
+answers its mode and bass. On the phone, Crusher automation is Smart adaptive (phone motion sensors). On the
+laptop and the PC there is also [Crusher Adaptive](#crusher-adaptive-mode), which listens to the room with
+the computer's own mic (not the Crusher's).
 
 **Live Translation and call mode.** Today it hears the other person through the AirPods' call mic (SCO). The AAP
 mic stream used by *What your AirPods hear* could replace that without call mode, once it is confirmed on your
@@ -341,7 +441,11 @@ right bud and `04` the left, which 1.9.1 and earlier had swapped) or from the BL
 | `laptop/headphone-panel.service` | A systemd user service for the panel. |
 | `laptop/apple-did.sh` | Switches BlueZ to Apple's Device ID (and back with `undo`). |
 | `windows/crusher_win.py` | Crusher control on Windows with no driver: RFCOMM through Winsock `AF_BTH` via ctypes. |
-| `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, and the Windows connection check. |
+| `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, the Adaptive wedge, and the Windows connection check. |
+| `shared/crusher_adaptive.py` | Crusher Adaptive's measuring and decisions (room level, voices, the policy, rate limit, AT commands), shared by the laptop and Windows. |
+| `laptop/hp_adaptive.py` | Crusher Adaptive on the laptop: the laptop mic through `parec`, the speakers-playing check and media ducking. |
+| `windows/crusher_adaptive_win.py` | Crusher Adaptive on Windows: the PC mic through winmm, a local API on `127.0.0.1:8971` and a CLI. |
+| `tests/` | Python unit tests (`python3 -m unittest discover -s tests`). |
 | `android/` | The home-screen widget app (Kotlin, no AndroidX), including Last seen and Find (`Tracker.kt`, `TrackActivity.kt`, `FinderActivity.kt`, the testable parts in `TrackLogic.kt`) and Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`) and Packets (`PacketsActivity.kt`, `PacketLog.kt`, the testable `PacketDecode.kt`) and Ear detection (`EarService.kt`, the shared link `AapLink.kt`, the testable `EarLogic.kt`). |
 | `docs/HOW-IT-WORKS.md` | The multi-device findings, with the packets that prove them. |
 | `docs/PROTOCOL.md` | The Crusher AT commands, the AAP packets, the BLE battery format and the panel API. |
@@ -355,7 +459,8 @@ sudo bash laptop/apple-did.sh                 # Modalias should read bluetooth:v
 # re-pair the AirPods on the laptop (the AirPods remember a host's Device ID from pairing time)
 mkdir -p ~/.config/headphone-panel ~/.local/share/headphone-panel ~/.config/systemd/user
 cp laptop/config.example.json ~/.config/headphone-panel/config.json   # fill in your addresses
-cp laptop/panel.py laptop/panel.html laptop/hp_eq.py shared/eq_presets.json ~/.local/share/headphone-panel/
+cp laptop/panel.py laptop/panel.html laptop/hp_eq.py laptop/hp_sound.py laptop/hp_adaptive.py \
+   shared/eq_presets.json shared/crusher_adaptive.py ~/.local/share/headphone-panel/
 cp laptop/headphone-panel.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now headphone-panel
 pactl set-card-profile bluez_card.<AIRPODS_MAC_WITH_UNDERSCORES> off   # control only, no audio
@@ -369,6 +474,12 @@ For the Crusher, set the `CRUSHER_MAC` environment variable and run `python wind
 No driver and no admin rights are needed. For the EQ, install Equalizer APO, tick your headphones in its
 Device Selector, then run `python windows\eq_apo.py preset bass` (keep `shared\eq_presets.json` where
 the script can find it: next to it, or at `..\shared\`).
+
+For Crusher Adaptive on the PC: `pip install numpy`, check the mics with
+`python windows\crusher_adaptive_win.py mics`, then turn it on with `python windows\crusher_adaptive_win.py on`
+(it starts in the background). To have it ready after a reboot, put a shortcut to
+`pythonw.exe windows\crusher_adaptive_win.py serve` in `shell:startup`; it remembers whether it was on.
+`shared\crusher_adaptive.py` must be next to the script or at `..\shared\`, like the EQ presets.
 
 ### Android phone
 
