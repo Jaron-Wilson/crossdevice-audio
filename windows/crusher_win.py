@@ -48,6 +48,7 @@ class GUID(ctypes.Structure):
 
 
 class SOCKADDR_BTH(ctypes.Structure):
+    _pack_ = 1   # ws2bth.h packs it (30 bytes); unpacked, btAddr lands 6 bytes off -> WSAEADDRNOTAVAIL (10049)
     _fields_ = [("addressFamily", ctypes.c_ushort), ("btAddr", ctypes.c_ulonglong),
                 ("serviceClassId", GUID), ("port", ctypes.c_ulong)]
 
