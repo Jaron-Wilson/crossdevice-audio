@@ -36,6 +36,51 @@ There is **no EQ over AT.** The app's EQ, Personal Sound (Mimi), button remappin
 go over Bragi's protobuf RPC or Airoha's RACE transport, not AT. For tone, the Crusher has its sensory
 bass, and the source-side EQ (below) covers everything else.
 
+`AT.FEATURE=info,0,<n>` lists `name,id,policy,?,enabled|disabled`. The Crusher (firmware checked
+2026-11-15) answers `count` = 5: Fastmute Control (disabled), Tile Find Me, Spotify One Touch, Remote Control
+(enabled) and Latency Mode (disabled). No feature senses or adapts to noise.
+
+### Airoha RACE: what the Crusher's chip reports (and doesn't)
+
+The Crusher ANC 2 is Skull-iQ model `CHP200` ("CHP200", "S6CAW"): an **Airoha AB1568**. Skull-iQ's device
+config for it lists ANC, transparency, filters and bass over BOS_AT, and only transparency gain, ANC gain,
+EQ, multipoint, TWS and FOTA over Airoha RACE. Bragi's `FeatureType` has no adaptive ANC, environment
+detection or adaptive EQ at all; the Airoha SDK inside the app does, as generic calls Skull-iQ never makes.
+
+**Transport.** RACE runs on its own RFCOMM (SPP) service, the Airoha default UUID
+`00000000-0000-0000-0099-AABBCCDDEEFF` (CHP200's config has no RACE service of its own, so the SDK's default
+`D5.c` is used). On Windows, connect with that UUID in `SOCKADDR_BTH.serviceClassId` and port 0 (Winsock
+does the SDP lookup); on Android `createRfcommSocketToServiceRecord(uuid)`. The generic SPP UUID `1101`
+connects too, but answers RACE packets with `ERROR` (it is an AT port). The Skullcandy RACE / legacy RACE /
+RPC UUIDs are not registered on this firmware (10049).
+
+**Packet.** `05 <type> <len u16 LE> <id u16 LE> <payload>`, `len` = 2 + payload length. Type `5A` = command
+that wants a reply, `5B` = reply, `5D` = notification. Replies carry a status byte (0 = OK) after the id.
+
+Read-only queries sent to the real headset (from the SDK's "Get" stages), all on the RACE channel:
+
+| SDK stage | Sent | Reply from the Crusher |
+|---|---|---|
+| MmiStageGetAncStatus (`0x0901`, module 5) | `05 5A 04 00 01 09 05 00` | `05 5B 09 00 01 09 05 00 00 09 00 00 AA` |
+| MmiStageGetPassThruGain (`0x0901`, module 7) | `05 5A 04 00 01 09 07 00` | `05 5B 08 00 01 09 07 00 00 00 00 00` |
+| MmiStageGetAudioFeatureCapability (`0x0E30`) | `05 5A 08 00 30 0E 00 01 00 00 00 00` | none |
+| AncStageGetFullAdaptiveAncStatus (`0x0E26`) | `05 5A 06 00 26 0E 00 0D 00 00` | none |
+| AncStageGetEnvironmentDetectionStatus (`0x0E17`) | `05 5A 04 00 17 0E 03 02` | none |
+| AncStageGetEnvironmentDetectionInfo (`0x0E15`) | `05 5A 03 00 15 0E 03` | none |
+| AdvancedStageGetAdaptiveEqDetectionStatus (`0x0901`, module 23) | `05 5A 04 00 01 09 17 00` | none |
+| AdvancedStageGetAdaptiveEqIndex (`0x0901`, module 21) | `05 5A 04 00 01 09 15 00` | none |
+
+"None" means no bytes within 6 s, while a `0x0901` query sent right after each one was answered at once, so
+the link was alive: the firmware simply has no handler for them. For reference, the SDK parses an
+environment detection reply as level (byte 12: 0 disabled, 1 to 4), feed-forward and feedback gain
+(bytes 8-9 and 10-11, int16 LE / 100) and stationary noise per side (bytes 13-14, 15-16), and the capability
+reply as one byte each for ANC (2 = full adaptive), passthrough, monitor, hearing aid, wind, environment
+detection, adaptive EQ, ANC sync, sidetone, NR. Never send the `0x0E06` "AncStageAncOn" or any set stage
+while exploring: they change the ANC filter.
+
+So the Crusher can't sense the room for us without call mode. The only headset-side sensor is its call mic
+(HFP), which is what Crusher Adaptive listens through (its only mic), only while nothing plays.
+
 ## AirPods Pro 2: AAP over classic L2CAP channel `0x1001`
 
 | Purpose | Bytes |
@@ -45,7 +90,7 @@ bass, and the source-side EQ (below) covers everything else.
 | Turn on notifications | `04 00 04 00 0F 00 FF FF FE FF` |
 | Noise mode | `04 00 04 00 09 00 0D <m> 00 00 00`, where `m`: 1 off, 2 ANC, 3 transparency, 4 adaptive |
 | Mode report (AirPods → host) | `04 00 04 00 09 00 0D <m> …` |
-| Battery (AirPods → host) | `04 00 04 00 04 00 <count> [<type> 01 <level> <status> 01]…`. Type: 2 left, 4 right, 8 case |
+| Battery (AirPods → host) | `04 00 04 00 04 00 <count> [<type> 01 <level> <status> 01]…`. Type: 2 **right**, 4 **left**, 8 case; status 1 charging, 2 discharging, 4 disconnected |
 | Audio source (AirPods → host) | `04 00 04 00 0E 00 <mac, reversed> <type>`. Type: 0 none, 1 call, 2 media |
 | Connected devices (AirPods → host) | `04 00 04 00 2E 00 01 00 <count> [<mac> <2 bytes>]…` |
 
@@ -101,6 +146,107 @@ Apple manufacturer data `0x004C`, first byte `0x07`. As a hex string `h` of that
 - flipped = `int(h[10],16) & 0x02 == 0`
 - left = `h[12]` if flipped else `h[13]`; right = the other one; case = `h[15]` (each × 10 %, `f` = unknown)
 - charging flags = `h[14]`: case `0b100`; left/right `0b01`/`0b10` (swapped when flipped)
+- status byte (`h[10:12]`, byte 5), as LibrePods' Linux code reads it: bit 6 = the bud sending this advert is
+  in the case, bit 4 = one bud in the case, bit 2 = both in the case, bit 5 = left bud is primary; in-ear bits
+  1 and 3 (which is which depends on bits 5 and 6). The Android finder uses bits 6/4/2 to split "case" from
+  "bud out of the case". Byte 9 is the colour.
+- The advert comes from a **resolvable private address** that changes about every 15 minutes. The phone app
+  resolves it with the AirPods' IRK (below); without the IRK it can only guess (same model, colour and
+  similar battery levels).
+
+### What the AirPods sense and report themselves (no call mode)
+
+| Message | Bytes | Meaning |
+|---|---|---|
+| Ear detection | `04 00 04 00 06 00 <primary> <secondary>` | 0 in ear, 1 out of ear, 2 in case. Sent on changes and once right after the notification request (seen) |
+| Conversation Awareness | `04 00 04 00 4B 00 02 00 01 <level>` | The wearer started (01/02) or stopped (03) speaking; 08/09 normal. Only while CA is on |
+| Microphone stream start | `04 00 04 00 58 00 00 00 09 00 00 01 82 00 00 00 04 96 00` | Asks for the mic stream |
+| Microphone stream stop | `04 00 04 00 58 00 00 00 02 00 03 01` | |
+| Microphone audio | `04 00 04 00 58 00 01 00` + 14 more header bytes, then `[timestamp u32 LE][len u8][AU]`… | AAC-ELD, mono, 64 kHz, 480-sample frames; AudioSpecificConfig `F8 E6 30 00` |
+
+Sources: LibrePods [`docs/AAP Definitions.md`](https://github.com/kavishdevar/librepods) (0x06, 0x4B, 0x2E),
+[librepods PR #655](https://github.com/librepods-org/librepods/pull/655) (`aacp.rs`, `aacp_audio.rs`, `eld.rs`) and
+the LibrePods `android/rewrite` branch (`AACPManager.requestMicrophoneStream`, `MicrophoneFrame`, `EldDecoder`) for
+0x58. LibrePods turns Conversation Awareness off while the stream runs; so does this app. The mic stream is not
+documented by Apple and is not yet confirmed here on real AirPods, so the app treats it as experimental: if no
+audio arrives within 5 s it stops and says so, and it never falls back to another microphone. No AAP message is
+known that reports an ambient noise *level*: Adaptive Audio measures it inside the AirPods and acts on it.
+
+The Crusher reports nothing it senses over AT: `AT.UIAUDIO?` and its unsolicited `.UIAUDIO` lines give only the
+mode, `AT.CRUSHER?` the bass. That is why Crusher Adaptive (README) listens through the Crusher's own call mic
+(only while nothing plays) and only sends the mode commands above plus `AT.UIAUDIO=transparency,,<n>`.
+Over Airoha RACE it doesn't either: the environment detection, full adaptive ANC and adaptive EQ queries of
+the SDK go unanswered on this firmware (see "Airoha RACE" above).
+
+### Ear detection: left and right (Android 1.9.0)
+
+The `0x06` report is ordered **primary bud first**, not left first. The primary is the bud that holds the link to
+the phone (and the microphone); when it leaves the ear the AirPods hand that role to the other bud and send the
+report again with the pair exchanged (LibrePods, "AAP Definitions"). So `00 02` means "one bud in ear, the other
+in the case", and which one is left needs a second source. The newest of these observations wins:
+
+1. **The AAP battery report's charging states** (`0x04`, above, with the types and states as corrected there). A
+   bud in the case is charging (`01`) or off the link (`04`); a bud out of it discharges (`02`). When the ear report
+   has exactly one bud in the case and the battery report exactly one bud charging or off the link, that is the
+   same bud, which says whether the primary is left or right. The battery report must be no older than 5 s before
+   the ear report. With the notification mask `FF FF FF FF` the battery report comes right after the link opens
+   (with `FF FF FE FF`, as 1.9.0 sent, none came in minutes); LibrePods' Android app and the laptop panel send
+   `FF FF FF FF` too.
+2. **The BLE proximity advert**, status bit 5 ("left bud is primary", LibrePods' Linux `blemanager.cpp`), from a
+   short scan (up to 6 s, stopped at the first advert from these AirPods) when the link opens and when the ears
+   change, at most every 30 s. Not yet confirmed on a real advert: on this phone, with the screen off, the scan
+   heard no advert at all.
+3. **The battery report's order**: LibrePods' Linux app takes the first bud listed as the primary (`battery.hpp`).
+   In the one live check (right bud in the ear and primary, left in the case) the right bud (`02`) was listed
+   first, which agrees, but that can't yet be told from a fixed right-then-left order, so it is used only while
+   nothing else has said. (1.9.0 used it with left and right swapped, which is why its sides were reversed.)
+4. **Role swap inference**: a report `(a, b)` followed within 2 s by `(b, a)`, with no other observation in
+   between, is the primary hand-off, so the known side flips with it.
+
+**Lid closed on a bud** (seen live): the bud in the case drops off the link, so the ear report gives a value
+other than 0/1/2 for it ("unknown") and the battery report state `04` (disconnected, level 0). The app then shows
+that bud as "in case (lid closed)" if it was last in the case or charging, or if nothing is known about it (a bud
+out of the case stays on the link), and treats it as in the case for auto-pause and resume; a bud that was last in
+an ear or out and then drops off reads "disconnected". The last place and charging state of each side are kept
+across links and app restarts for this.
+
+If none of these is known yet, the app says "One bud in ear, the other in case (which is left isn't known yet)"
+instead of guessing. The pause and listening rules don't need the sides: they count buds in an ear.
+
+The app keeps **one** AAP link per phone (`AapLink.kt`): ear detection holds it while the AirPods are connected,
+and the mic stream and short reads or settings join it rather than opening a second link (the AirPods expect one
+link per host). The opening sequence (handshake, features `0x4D`, notifications `0x0F`) is sent once, when the
+first user opens it.
+
+### Proximity keys over AAP (Android Last seen / finder)
+
+Sent on the phone's own AAP link, format from LibrePods (`AACPManager`): request
+`04 00 04 00 30 00 <types> 00` (`01` = IRK, `04` = encryption key; the app asks only for `01`, at most once an
+hour until it has it). Reply `04 00 04 00 31 00 <count>` then per key `<type> 00 <len> 00 <key bytes>`. The
+16-byte IRK is least-significant byte first; an address resolves when `ah(IRK, prand) == hash` (Bluetooth Core
+spec, Vol 3 Part H), with `prand` = the top three address bytes and `hash` = the bottom three. The key stays
+in the app's private storage.
+
+AirPods battery over AAP: `04 00 04 00 04 00 <count>` then per component `<type> 01 <level> <status> 01`
+(type 2 **right**, 4 **left**, 8 case, 1 single headset; status 0 unknown, 1 charging, 2 discharging, 4 disconnected;
+LibrePods `battery.hpp`). Up to 1.9.1 the app and the laptop panel had both swapped (2 read as left, 2 read as
+charging), which showed left and right battery the wrong way round and reversed the ear-detection sides. A real
+report with both buds in the ears and the case away: `04 00 04 00 04 00 03 02 01 5B 02 01 04 01 5D 02 01 08 01 00 04 01`
+= right 91% discharging, left 93% discharging, case disconnected.
+
+No "play a sound" command is documented by LibrePods (its README lists it as planned, not done), so the app
+doesn't send one.
+
+### Seeing the packets live (Android Packets screen)
+
+The phone app's *Packets* screen (1.8.0) logs every AAP packet and AT command/reply at the one place each
+crosses the socket (`PhoneDirect.write` and the shared AAP link's reader in `AapLink`, `CrusherDirect`'s session) and decodes them with
+the tables above. Opcodes it decodes: `0x04` battery, `0x06` ear detection, `0x09` control commands, `0x0E`
+audio source, `0x0F` notifications, `0x17` head tracking, `0x1A` rename, `0x1D` device info, `0x2E` connected
+devices, `0x30`/`0x31` proximity keys, `0x4B` Conversation Awareness, `0x4D` feature flags, `0x58` mic stream;
+anything else shows as "unknown opcode". Addresses (`0x0E`, `0x2E`), key bytes (`0x31`), names and serials
+(`0x1A`, `0x1D`, and any text in any packet except model numbers and firmware versions) are masked before
+they are stored.
 
 ## Panel HTTP API (laptop, 127.0.0.1:8970, published over Tailscale)
 
@@ -119,25 +265,40 @@ Apple manufacturer data `0x004C`, first byte `0x07`. As a hex string `h` of that
 | POST | `/api/sound/stop` | | Stop listening now |
 | POST | `/api/sound/unmute` | source id | Unmute that microphone |
 | POST | `/api/sound/notch` | `{"kind":"mic"\|"output","freqs":[60,120]}` | Notch filter on the laptop mic (new default input) or in front of the default output; `[]` turns it off and restores the old default |
-| GET | `/api/caps` | | `{crusher:bool, airpods:bool, eq:bool}`. Fast; the rings poll it |
+| GET | `/api/caps` | | `{crusher:bool, airpods:bool, crusher_adaptive:bool, eq:bool}`. Fast; the rings poll it |
 | POST | `/api/airpods/mode` | `off\|anc\|transparency\|adaptive` | 503 if the AirPods aren't connected |
-| POST | `/api/crusher/mode` | `anc\|transparency\|off` | |
+| POST | `/api/crusher/mode` | `anc\|transparency\|off\|adaptive` | `adaptive` turns Crusher Adaptive on (and ends a pause). The other three are a manual change: they pause Adaptive. So does setting `transparency_level` |
+| GET | `/api/crusher/adaptive` | | `{available, enabled, paused, paused_for_s, listening, mic, phase:off\|paused\|no_crusher\|music\|quiet_wait\|mic_error\|listening, music_hold, media_playing, mic_error, status, error, ambient_db, raw_db, zone:quiet\|moderate\|loud, steady, speech, conversation, target:{mode,level,label}, thresholds:{quiet_max,loud_min}, settings}`. `mic` is the Crusher's mic while it listens (the only mic it uses); `music_hold` true = paused while music plays (or in the 10 s after), holding `target`. Also in `/api/state` as `crusher.adaptive` |
+| POST | `/api/crusher/adaptive` | `{"enabled":true,"sensitivity":60,"conversation":true,"pause_min":10}` | Any subset. `pause_min` 0 = until Adaptive is picked again |
 | POST | `/api/crusher/bass` | `0-10` | |
 | POST | `/api/handoff` | `phone\|laptop` | Who has the AirPods. The laptop steps aside for the phone |
+| GET | `/api/track` | | Last seen on the laptop: `{airpods:{connected, last_connected, events:[{t, event:connected\|disconnected, where:"laptop"}]}, crusher:{…}}`. Times are Unix seconds. Polled from BlueZ every 30 s, last 50 per device, stored in `~/.local/state/headphone-panel/track.json` |
+| POST | `/api/track/clear` | | Clears that log |
 
 ## Sound viewer and "block that sound" (laptop panel)
 
-What the AirPods can't do: their ANC microphones and filters are internal. AAP exposes no mic audio and no
-way to tell the ANC which sound to remove. The only AirPods mic a computer can use is the call mic (HFP):
-mono, low quality, and while it's open the music drops to call quality too.
+What the AirPods can't do: their ANC filters are internal, and AAP has no way to tell the ANC which sound to
+remove. Their microphones *are* reachable without call mode through the AAP microphone stream (0x58, below),
+which the phone app uses; the laptop panel doesn't (yet), and never opens the HFP call mic.
 
 What the panel does instead (`laptop/hp_sound.py`):
-- **Viewer**: `parec` captures mono 24 kHz from the laptop mic (default) or, behind a confirmation, the
-  headphones' call mic; numpy FFTs (4096 points, a frame every 125 ms) feed a waterfall + spectrum in the
-  page. It only runs while the page is open and visible. The headphone mic stops itself after 3 minutes and
-  the headphones go back to their previous profile.
+- **Viewer**: `parec` captures mono 24 kHz from the laptop mic only (the headphones' call mic is never
+  offered: opening it would switch them to HFP); numpy FFTs (4096 points, a frame every 125 ms) feed a
+  waterfall + spectrum in the page. It only runs while the page is open and visible. For listening through
+  the AirPods themselves, use the phone app's *What your AirPods hear* (below).
 - **Pick a sound**: tap (1/3 octave) or drag a range. The panel reports the peak frequency, whether it's a
   tone or spread out, whether it's steady, and a rough label (mains hum, rumble, fan, voices, whine, hiss).
 - **Reduce it**: outside sound -> only the AirPods' ANC (buttons for Noise Cancellation / Adaptive at the
   strongest setting; best on steady low sounds). Sound through the laptop -> a PipeWire `bq_notch` filter
   chain on the laptop mic or on the output (optionally with 2x and 3x harmonics for hum).
+
+## Crusher Adaptive on Windows (local API, 127.0.0.1:8971)
+
+`windows/crusher_adaptive_win.py serve` listens on loopback only.
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/state` | | The same fields as the panel's `/api/crusher/adaptive`, with `crusher_mic` (the Crusher's Hands-Free input name, or null) |
+| POST | `/enable` / `/disable` | | Turn it on (ends a pause) or off (closes the mic) |
+| POST | `/manual` | | A mode was changed by hand: pause. `crusher_win.py anc\|transparency\|transparency-level` sends it |
+| POST | `/set` | `{"sensitivity":60,"conversation":true,"pause_min":10}` | Any subset. There is no mic choice: only the Crusher's own mic is ever opened |

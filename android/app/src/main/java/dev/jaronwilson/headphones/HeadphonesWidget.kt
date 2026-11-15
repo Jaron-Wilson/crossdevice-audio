@@ -25,9 +25,9 @@ class HeadphonesWidget : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         scheduleRefresh(context)
-        val pending = goAsync()
+        val pending = finishSoon(goAsync())
         thread {
-            try { refresh(context) } finally { pending.finish() }
+            try { refresh(context) } finally { pending() }
         }
     }
 
@@ -43,10 +43,10 @@ class HeadphonesWidget : AppWidgetProvider() {
         }
         // Show the choice at once (optimistic), then confirm with the panel's real state.
         render(context, optimistic(last, cmd), if (cmd == "refresh") "Refreshing…" else null)
-        val pending = goAsync()
+        val pending = finishSoon(goAsync())
         val app = context.applicationContext
         if (cmd == "refresh") {
-            work.execute { try { refresh(app) } finally { pending.finish() } }
+            work.execute { try { refresh(app) } finally { pending() } }
             return
         }
         // Spamming buttons used to start one slow Bluetooth session per tap; they piled up and the OS
@@ -62,16 +62,31 @@ class HeadphonesWidget : AppWidgetProvider() {
                 if (err == null) refresh(app)
                 else render(app, withPhoneBattery(app, fetch(app)), failText(app, full, err))
             } finally {
-                pending.finish()
+                pending()
             }
         }
     }
 
     companion object {
+        /**
+         * A refresh (a short BLE scan, the laptop, a Bluetooth read) can take longer than the 10 s Android
+         * gives a widget broadcast; holding it past that is an ANR, which kills the app (and its services).
+         * So the broadcast is released after [HOLD_MS] at the latest; the work carries on. Returns the
+         * "done" call for the end of the work (safe to call twice).
+         */
+        private fun finishSoon(p: android.content.BroadcastReceiver.PendingResult): () -> Unit {
+            val done = java.util.concurrent.atomic.AtomicBoolean(false)
+            val finish = { if (done.compareAndSet(false, true)) runCatching { p.finish() } }
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ finish() }, HOLD_MS)
+            return { finish() }
+        }
+        private const val HOLD_MS = 8_000L
+
         private const val ACTION = "dev.jaronwilson.headphones.CMD"
         private const val EXTRA_CMD = "cmd"
 
         @Volatile private var last: JSONObject? = null
+        @Volatile private var shown: JSONObject? = null     // the state last drawn (with the phone's own data)
 
         // One worker for all taps (serialized), plus the latest pending arg per device (coalescing).
         private val work = Executors.newSingleThreadExecutor()
@@ -83,7 +98,7 @@ class HeadphonesWidget : AppWidgetProvider() {
         fun panelState(context: Context): JSONObject? = fetch(context)
 
         /** Redraw from the last known state (e.g. after an EQ change in the app). */
-        fun redraw(context: Context) = render(context, last, null)
+        fun redraw(context: Context) = render(context, shown ?: last, null)
 
         /** Fetch and redraw; if the laptop disagrees about who has the AirPods, correct it first. */
         fun refresh(context: Context) {
@@ -95,7 +110,14 @@ class HeadphonesWidget : AppWidgetProvider() {
                 if (Handoff.tell(context, Handoff.local(context))) state = fetch(context)
             }
             render(context, withPhoneBattery(context, state), null)
+            // Last seen: a short low-power scan at most every ~5 minutes, then redraw the "last seen" line
+            runCatching { if (CrusherDirect.connected(context)) Tracker.crusherBatteryNow(context) }
+            runCatching { Tracker.periodicScan(context) }
+            render(context, shown, null)
         }
+
+        /** GET a panel path (e.g. /api/track), or throw. */
+        fun get(context: Context, path: String) = http(context, "GET", path)
 
         /** Refresh about every 5 minutes, only while the phone is awake (no wakeups, no battery cost). */
         private fun scheduleRefresh(context: Context) {
@@ -201,14 +223,18 @@ class HeadphonesWidget : AppWidgetProvider() {
                             if (onPhone) CrusherDirect.setBass(context, next)
                             else http(context, "POST", "/api/crusher/bass", next.toString())
                         }
-                        else -> if (onPhone) CrusherDirect.setMode(context, arg)
-                                else http(context, "POST", "/api/crusher/mode", arg)
+                        else -> {
+                            CrusherAdaptiveCtl.manual(context, "picked on the widget")   // by hand: Adaptive pauses
+                            if (onPhone) CrusherDirect.setMode(context, arg)
+                            else http(context, "POST", "/api/crusher/mode", arg)
+                        }
                     }
                 }
             }
         }
 
         private fun render(context: Context, state: JSONObject?, note: String?) {
+            if (note == null) shown = state
             val v = RemoteViews(context.packageName, R.layout.widget)
             val ap = state?.optJSONObject("airpods")
             val cr = state?.optJSONObject("crusher")
@@ -218,7 +244,7 @@ class HeadphonesWidget : AppWidgetProvider() {
             val onPhone = Handoff.local(context)
             val status = when {
                 note != null -> note
-                onPhone -> "On this phone" + batteryText(ap).let { if (it.isEmpty()) "" else " · $it" } +
+                onPhone -> "On this phone" + Ears.liveText(context).ifEmpty { batteryText(ap) }.let { if (it.isEmpty()) "" else " · $it" } +
                     (if (PhoneDirect.status(context) == "fail") " · hold stem for modes" else "")
                 !Config.hasAirPods(context) && !Config.hasPanel(context) && !crOn -> "Open the Headphones app to set up"
                 state == null && !Config.hasPanel(context) -> "AirPods not connected to this phone"
@@ -243,6 +269,7 @@ class HeadphonesWidget : AppWidgetProvider() {
             }
             // Crusher: mode + bass level.
             val crMode = when {
+                crOn && CrusherAdaptiveCtl.active(context) -> "adaptive"
                 cr?.optBoolean("anc") == true -> "anc"
                 cr?.optBoolean("transparency") == true -> "transparency"
                 crOn -> "off"
@@ -252,6 +279,12 @@ class HeadphonesWidget : AppWidgetProvider() {
                 v.setInt(id, "setBackgroundResource", if (crMode == key) R.drawable.btn_on else R.drawable.btn)
                 v.setOnClickPendingIntent(id, cmdIntent(context, "cr:$key", id))
             }
+            // Adaptive: opens the app, which turns it on (Android only lets a visible app start the microphone)
+            v.setInt(R.id.cr_ad, "setBackgroundResource", if (crMode == "adaptive") R.drawable.btn_on else R.drawable.btn)
+            v.setOnClickPendingIntent(R.id.cr_ad, PendingIntent.getActivity(context, R.id.cr_ad,
+                Intent(context, SetupActivity::class.java).setAction(CrusherAdaptiveCtl.ACTION_ON)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             val bass = cr?.opt("bass")
             v.setTextViewText(R.id.cr_bass, if (bass is Number) "Bass ${bass.toInt()}/10" else "Bass")
             v.setOnClickPendingIntent(R.id.cr_bdown, cmdIntent(context, "cr:bass-", R.id.cr_bdown))
@@ -272,6 +305,16 @@ class HeadphonesWidget : AppWidgetProvider() {
                 Intent(context, TranslateActivity::class.java).setAction(TranslateActivity.ACTION_TOGGLE)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+
+            // Last seen: "AirPods last seen 2:41 PM", tap for the map
+            val seen = runCatching { Tracker.latest(context) }.getOrNull()
+            if (seen != null && !Tracker.connected(context, seen.device)) {
+                v.setViewVisibility(R.id.seen, View.VISIBLE)
+                v.setTextViewText(R.id.seen, "${Tracker.label(seen.device)} last seen ${Tracker.timeText(seen.t)}" +
+                    (if (seen.hasLocation) " · map" else ""))
+            } else v.setViewVisibility(R.id.seen, View.GONE)
+            v.setOnClickPendingIntent(R.id.seen, PendingIntent.getActivity(context, R.id.seen,
+                Intent(context, TrackActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE))
 
             val mgr = AppWidgetManager.getInstance(context)
             mgr.updateAppWidget(ComponentName(context, HeadphonesWidget::class.java), v)

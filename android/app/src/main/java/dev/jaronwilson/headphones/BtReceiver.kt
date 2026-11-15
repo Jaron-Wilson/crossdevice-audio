@@ -7,22 +7,33 @@ import android.content.Intent
 import kotlin.concurrent.thread
 
 /**
- * The AirPods connected to / disconnected from this phone. The phone and the laptop can't share the
- * AirPods (each one joining kicks the other), so tell the laptop panel to let go or take them back,
- * then redraw the widget.
+ * The AirPods or the Crusher connected to / disconnected from this phone. For the AirPods: the phone
+ * and the laptop can't share them (each one joining kicks the other), so tell the laptop panel to let go
+ * or take them back. For both: Last seen (time, battery, location if allowed), then redraw the widget.
  */
 class BtReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         @Suppress("DEPRECATION")
         val dev: BluetoothDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) ?: return
-        if (!dev.address.equals(Config.airpodsMac(context), ignoreCase = true)) return
+        val which = Tracker.deviceOf(context, dev) ?: return
         val onPhone = intent.action == BluetoothDevice.ACTION_ACL_CONNECTED
-        Handoff.setLocal(context, onPhone)
+        val isAirPods = which == Tracker.AIRPODS
+        if (isAirPods) {
+            Handoff.setLocal(context, onPhone)
+            // Ear detection: hold the AAP link while they're here (a Bluetooth broadcast may start it)
+            EarService.sync(context)
+        }
+        // Last seen: note the connect, or save time/battery (and location, if allowed) on disconnect.
+        if (onPhone) Tracker.onConnected(context, which)
         val pending = goAsync()
+        val app = context.applicationContext
         thread {
             try {
-                Handoff.tell(context, onPhone)
-                HeadphonesWidget.refresh(context)
+                // in parallel, so the laptop hand-off isn't held up by a location fix
+                val track = if (onPhone) null else thread { runCatching { Tracker.onDisconnected(app, which) } }
+                if (isAirPods) Handoff.tell(app, onPhone)
+                track?.join(15_000)
+                HeadphonesWidget.refresh(app)
             } finally {
                 pending.finish()
             }

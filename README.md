@@ -9,8 +9,9 @@ It also has a shared 5-band EQ with a draggable curve, the AirPods' adaptive noi
 and the Crusher's extra settings (see [Customizing the sound](#customizing-the-sound)).
 
 Two things are optional and off by default: **spatial audio** (Linux laptop only, with experimental head
-tracking) and the **laptop mic tools** (a sound viewer and notch filters). Nothing here ever switches the
-headset to call (HFP) mode, so audio quality stays the same while you use the controls.
+tracking) and the **laptop mic tools** (a sound viewer and notch filters). The controls never switch the
+headset to call (HFP) mode, so audio quality stays the same while you use them; only Live Translation and
+Crusher Adaptive (which listens through the Crusher's own mic, only while nothing plays) use it.
 
 It doesn't need an iPhone, a kernel driver, a Secure Boot change, a USB dongle or a rooted phone.
 
@@ -22,13 +23,14 @@ It doesn't need an iPhone, a kernel driver, a Secure Boot change, a USB dongle o
 
 | Where | How you use it | What you get |
 |---|---|---|
-| **Windows PC** | `Alt+Q`, flick up, then flick out | Volume, media keys and Crusher modes and bass. AirPods modes go through the laptop. |
+| **Windows PC** | `Alt+Q`, flick up, then flick out | Volume, media keys and Crusher modes (including Crusher Adaptive) and bass. AirPods modes go through the laptop. |
 | **Linux laptop** | `Alt+Q`, flick up, then flick out | The same ring, plus an audio output switcher. The laptop is what talks to the AirPods. |
 | **Web panel** | `https://<laptop>:8970` over Tailscale | Every control with live state and AirPods battery. |
 | **Android widget** | Home screen | AirPods modes and battery straight from the phone, with no laptop or Tailscale needed. When the AirPods aren't on the phone it works through the laptop. |
 
 The ring only shows controls that the connected headphones can actually do. AirPods get Adaptive, the
-Crusher gets Bass, and with nothing connected only volume and track controls are left:
+Crusher gets Bass (and Adaptive too, once [Crusher Adaptive](#crusher-adaptive-mode) is set up on that
+computer), and with nothing connected only volume and track controls are left:
 
 | Both connected | AirPods only | Crusher only |
 |---|---|---|
@@ -110,6 +112,7 @@ this broadcast, so battery shows no matter which device is playing.
 | Conversational Awareness, Personalized Volume, ear detection, one-bud ANC, "Off" in press and hold | AAP `0x28`, `0x26`, `0x0A`, `0x1B`, `0x34` | | Panel, Android app |
 | Press-and-hold cycle (which modes) | AAP `0x1A` | | Panel, Android app |
 | Sensory bass level and on/off | | `AT.CRUSHER` | Panel, Android app, `crusher_win.py`, ring |
+| Adaptive mode (the Crusher's own mic hears the room while nothing plays and picks the mode; the mode is held while music plays) | (built in) | [Crusher Adaptive](#crusher-adaptive-mode): `AT.UIAUDIO` mode and transparency level | Panel, ring, `crusher_adaptive_win.py`, Android app |
 | Transparency level, hear-through on calls / when paused | | `AT.UIAUDIO=transparency,,n`, `atoncall`, `atonpause` (shown only if the firmware answers) | Panel, Android app, `crusher_win.py` |
 | Firmware feature flags (Tile Find Me, Spotify One Touch, Remote Control, Latency Mode) | | `AT.FEATURE=info`, read-only | Panel |
 
@@ -134,6 +137,124 @@ mic or out of the laptop's output. Both are off until you turn them on.
 the AirPods between Adaptive levels as you walk, drive or sit still.
 
 All three use `shared/eq_presets.json`, so a preset sounds the same everywhere.
+
+## Crusher Adaptive mode
+
+AirPods Pro 2 have an Adaptive mode that listens with their own mics and blends noise cancelling and
+transparency. The Crusher ANC 2 has nothing like it, and it reports nothing it senses. Its chip is an Airoha
+AB1568, and Airoha's SDK has calls for exactly this (environment detection, full adaptive ANC, adaptive EQ),
+but the Crusher's firmware answers none of them; checked on the headset over Airoha's RACE channel, see
+[PROTOCOL.md](docs/PROTOCOL.md#airoha-race-what-the-crushers-chip-reports-and-doesnt). So Crusher Adaptive
+does the same job from the device the Crusher is connected to (laptop, PC or phone), listening to the room
+through **the Crusher's own mic only**. The laptop's, PC's and phone's microphones are never opened.
+
+That mic only works in the Bluetooth call profile (HFP), which turns music into mono call audio. So Adaptive
+listens only after **nothing has played for 10 s**, and closes the mic within about a second when anything
+plays. While music plays it **holds the last mode it chose** and shows *paused while music plays*; a
+conversation it was in ends then, since the end of the talking can no longer be heard. If the "is anything
+playing?" check fails, that counts as playing, so it never risks call mode over music.
+
+It works **on its own on each device**: the laptop panel, the Windows daemon and the Android app each run
+the whole thing locally (mic, decision and the Crusher's AT link) and need nothing else. On the phone no
+laptop, PC or server is involved.
+
+| The room | The Crusher |
+|---|---|
+| Quiet | Transparency at a moderate level (50) |
+| Some noise that comes and goes (people, a cafe) | Transparency, lower (20). Off if the firmware has no transparency level |
+| Loud, or a steady noise (fan, engine, air conditioning) | ANC |
+| Someone talking nearby (Conversation awareness, on by default) | Transparency high (100); back to the room's mode about 5 s after the talking stops |
+
+```mermaid
+flowchart TB
+  on(["Crusher Adaptive on,<br/>Crusher connected to this device"]) --> play{"Anything playing?<br/>(a failed check counts as yes)"}
+  play -- yes --> held["Paused while music plays:<br/>mic closed within about 1 s,<br/>the last mode is held"]
+  held --> play
+  play -- no --> idle{"Nothing played<br/>for 10 s?"}
+  idle -- no --> held
+  idle -- yes --> mic["The Crusher's own mic<br/>(call profile while it listens)"]
+  mic --> meter["Every 0.5 s: room level<br/>(A-weighted dB over 1 s, smoothed)<br/>steady? voices nearby?"]
+  meter --> pol["Policy: quiet / some noise / loud<br/>with 4 dB hysteresis"]
+  pol --> wait{"Held 4 s and 12 s<br/>since the last switch?"}
+  wait -- no --> pol
+  wait -- yes --> rate["At most one command batch per 3 s"]
+  talk["Voices for about 1 s"] --> rate
+  rate --> at["AT.UIAUDIO over RFCOMM 9"] --> crusher(["Crusher ANC 2"])
+  manual["You pick ANC / Transparency / Off,<br/>or press the headset's button"] --> pause["Adaptive pauses 10 min<br/>(or until you pick Adaptive again)"]
+```
+
+**Where it runs**
+
+- **Laptop (web panel).** An *Adaptive* button next to ANC / Transparency / Off. The card under it shows the
+  room level in dB, quiet / some noise / loud, steady, voices, what it chose and whether it is paused while
+  music plays, live. Settings: sensitivity, conversation awareness, and how long a manual change pauses it.
+  When nothing has played for 10 s (no PipeWire output RUNNING), the Crusher's card is switched to its
+  headset (HFP) profile, its `bluez_input` source is read by `parec` at 16 kHz, and the previous profile
+  (A2DP) is put back when it closes. The ring's *Adaptive* wedge goes through the panel.
+- **Windows PC.** `windows/crusher_adaptive_win.py` runs as a small background process with a local API on
+  `127.0.0.1:8971`. The ring's *Adaptive* wedge runs `crusher_adaptive_win.py on` (which starts it if needed)
+  and `off`; ANC and Transparency still go through `crusher_win.py`, which pauses Adaptive. The only input it
+  opens is the Crusher's Hands-Free mic (winmm `waveIn`, found by name); no other input and never the Windows
+  default. "Anything playing" is every active output's peak meter (Core Audio through ctypes COM).
+  `crusher_adaptive_win.py mics` lists the inputs and marks the one it uses, `playing` shows the meters, and
+  `measure` prints the room level and the voices flag through the Crusher's mic without touching its mode
+  (refused while something plays), to pick a sensitivity.
+- **Android (1.11.0).** On the app screen next to the Crusher's modes, and an *Adaptive* button on the
+  widget (it opens the app to start it, since Android only lets a visible app start the mic). Everything runs
+  on the phone: the Crusher's mic over Bluetooth SCO (`AudioRecord` pinned to the Crusher's SCO input),
+  "anything playing" from `AudioManager.isMusicActive()`, the decision in the app and the commands over the
+  app's own AT link to the Crusher. It runs in a microphone foreground service with a notification while
+  Adaptive is on, so it keeps going after the app is closed. Android does not let an app start the mic by
+  itself after a reboot, so then a notification *Crusher Adaptive is on: tap to resume* brings it back with
+  one tap. Turning it on turns Smart adaptive off for the Crusher, and the other way round, so the two never
+  fight.
+
+**What call mode means here.** While Adaptive listens the Crusher is in call mode: a sound that starts plays
+at call quality for up to a second before the mic closes, and the switch can click. Your own voice counts as
+voices nearby. Checked on the PC: the Crusher's mic read -64 to -88 dB in a quiet room, its mode was
+untouched, and music quality came back when it closed. The headset's call processing lowers steady noise,
+so set the sensitivity with `measure` or the live dB.
+
+**Privacy.** The audio is measured in memory a quarter second at a time and dropped. What is kept is a
+handful of numbers: the level in dB, and for the voices check the voice-band level and whether a pitch was
+found, per 20 ms, for the last 2 s. Nothing is recorded, written to disk or sent anywhere; the settings file
+holds only the settings. The mic is open only while Adaptive is on, not paused, nothing plays and the
+Crusher is connected to that device.
+
+**How it decides.**
+- *Level*: A-weighted RMS over 1 s windows (a reading every 0.5 s), in dB relative to the mic's full scale,
+  smoothed. *Steady*: the last 6 s vary by 2 dB or less (and stop being steady above 3 dB).
+- *Voices nearby*: over the last 2 s, most of the energy is in 300 to 3400 Hz, its level swings by several dB
+  at syllable rate (2 to 8 Hz), and at least a fifth of the louder 20 ms frames have a voice pitch (80 to
+  500 Hz). Fans, hum, hiss and typing fail one of these. It doesn't recognise words or who is talking.
+- *Never flapping*: the quiet / some noise / loud thresholds have 4 dB of hysteresis, a new situation must
+  last 4 s, and there are at least 12 s between switches. Conversation switches skip the waiting (that is
+  the point of them) but still go through the limit of one command batch per 3 s. Voices don't move the
+  room's level class, so talking in a quiet room doesn't count as noise. Each time the mic opens again the
+  measuring starts over, but the Crusher keeps its current mode.
+- *Your choice wins*: picking ANC, Transparency or Off (panel, ring, app, `crusher_win.py`) or the
+  transparency level pauses Adaptive for 10 minutes (5, 30, or "until I pick Adaptive" in the settings).
+  Every 30 s it reads the mode back while the mic is closed (call mode can change what the headset reports),
+  so a change with the headset's button pauses it too.
+- *Sensitivity* (0 to 100, default 50) moves both thresholds by up to 10 dB. At 50, quiet is under -50 dB
+  and loud is over -36 dB (A-weighted, full scale). Watch the live dB in a quiet room and in a noisy one, and
+  move the slider until the zones match.
+
+**Limits, honestly.**
+- It senses nothing while music plays. That is the price of using only the Crusher's mic: it adapts when
+  you are not listening to anything (or between tracks of 10 s or more), and keeps that mode through music.
+- The Crusher has three modes and a transparency level; there is no ANC strength over AT, so "more noise
+  cancelling" is a switch to ANC, not a blend. Each switch takes the Crusher a moment and may click.
+- Levels are uncalibrated (dB relative to the mic's full scale), which is why there is a sensitivity slider.
+- An app that keeps an audio stream open with silence (some browsers, games) counts as playing.
+- If two programs use the Crusher's AT channel at the same moment (for example `crusher_win.py` while
+  Adaptive switches), one of them can fail and is retried on the next pass.
+
+Run the tests (no hardware; the measuring tests need numpy):
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 ## Live Translation (Android 1.3.0)
 
@@ -170,6 +291,84 @@ How the audio is routed:
   stops the app from translating its own voice. It is half-duplex: speech that overlaps playback is missed.
 - Call audio over Bluetooth SCO is narrowband or wideband, so translations in the AirPods sound like a phone call.
 
+## Last seen and Find (Android 1.4.0)
+
+Where did I leave them? The app answers with only your own devices: no Apple Find My network, no Google Find
+Hub, no account, no API key and no upload. Open it from the app's **Last seen and Find** button or the widget's
+"last seen" line.
+
+- **Last seen.** When the AirPods or the Crusher disconnect from the phone, the app saves the time, the last
+  battery levels, where the buds were (in the case, in ears, one out) and, if you allow it, the phone's
+  location. When the app's Bluetooth scans hear your AirPods it also saves "seen nearby" (at most once every
+  5 minutes, with the signal strength), and "last heard here" when they go quiet. The last 50 events per
+  device are kept in the app's private storage. **Clear history** deletes them (and the laptop's log, if set up).
+- **Map.** OpenStreetMap through [osmdroid](https://github.com/osmdroid/osmdroid): no key, and tiles you have
+  looked at stay cached on the phone for offline use. A pin, the time, "Disconnected here", the history list
+  and a **Navigate** button (opens your maps app with a `geo:` link).
+- **Hotter / colder.** A screen that scans Bluetooth LE at full speed only while it is open, smooths the signal
+  (a small Kalman filter), and shows a ring, Hot / Warm / Cold, a rough distance and a buzz that speeds up as you
+  get closer. The case and a bud that is out of the case are shown separately.
+- **Laptop.** The panel logs when the AirPods and the Crusher connect to and disconnect from the laptop (no GPS
+  there, so it is "at the laptop" plus the time). Over Tailscale the app shows "last connected to the laptop at 3:12 PM".
+- **Widget.** A small "AirPods last seen 2:41 PM" line; tap it for the map.
+
+**Telling your AirPods apart.** AirPods broadcast from a random address that changes about every 15 minutes.
+While they are connected to the phone, the app asks them over its own AAP link for their identity key (IRK)
+and keeps it on the phone. With the key, an advert is matched exactly (Bluetooth's standard address
+resolution). Without it the app guesses: same model and colour as yours and battery levels like yours. Another
+set of the same AirPods nearby could then be mistaken for yours, and the finder says so. The IRK request
+follows LibrePods and hasn't been confirmed on every firmware.
+
+**Limits, honestly.**
+- AirPods in a **closed case** mostly stop broadcasting, so the finder can't hear them until the lid opens or a
+  bud comes out. Range is roughly 10-30 m, and the distance is a rough guess.
+- **No "play sound".** Apple only offers it through Find My, and LibrePods documents no AAP command for it, so
+  the app doesn't have one.
+- **Crusher:** it is a classic Bluetooth headset. The finder only hears it if it sends a Bluetooth LE broadcast
+  with its name or its Bluetooth address; otherwise you only get its disconnect time and place.
+- **Location at disconnect time.** With "while using the app", Android usually refuses a location while the
+  app is closed. The app tries a few seconds of foreground location; if Android says no, only the time and
+  battery are saved. For the spot every time, choose "Allow all the time" (optional). The app asks for one
+  fix per disconnect and never tracks you in between.
+
+**Permissions it asks for, and why:** *Location* (precise, optional, asked on the Last seen screen) for the
+spot where they disconnected. *Location all the time* (optional, separate) so that works while the app is
+closed. *Nearby devices* (already used for the widget) for the scans. *Vibrate* for the finder's buzz.
+
+## Phone first (Android 1.5.0)
+
+Everything that is a command to the headphones, or sound processing on the device that plays, runs on the
+phone with no laptop. Anything that "listens" uses the headphones' own sensing, never a laptop or phone mic,
+except Crusher Adaptive (the Crusher senses nothing itself, so it uses the host's mic while it is on), and
+nothing uses call (HFP) mode except Live Translation and Crusher Adaptive's opt-in headset mic (see below).
+
+| Feature | Runs on | Audio input | Fully on the phone? |
+|---|---|---|---|
+| AirPods modes (Off / ANC / Transparency / Adaptive) | Phone (AAP), laptop panel, rings | none | Yes: app screen and widget |
+| Adaptive level, Conversation Awareness, Personalized Volume, ear detection, one-bud ANC, press-and-hold cycle | Phone (AAP), laptop panel | AirPods' own mics, inside the AirPods | Yes |
+| Ear status (in ear / in case) | Phone, laptop panel | AirPods' sensors (AAP `0x06`) | Yes (shown on the app screen) |
+| Crusher modes, sensory bass level and on/off, hear-through on calls / paused | Phone (AT over RFCOMM), laptop panel, Windows | none | Yes: app screen (mode buttons and a bass slider in 1.5.0) and widget |
+| EQ, Rumble, limiter, low-band compressor | Phone (DynamicsProcessing), laptop (PipeWire), Windows (Equalizer APO) | none | Yes; 1.5.0 uses the laptop's compressor numbers and also compresses when only Bass is boosted |
+| Smart adaptive (AirPods and Crusher) | Phone | phone motion sensors, no mic | Yes |
+| Crusher Adaptive (room level picks the Crusher's mode) | Phone (1.11.0), laptop panel, Windows | the Crusher's own mic only, in call mode, only while nothing plays (the mode is held while music plays) | Yes: works on the phone alone |
+| What your AirPods hear (sound viewer: spectrum, "what is that sound", block it) | Phone (new in 1.5.0) | AirPods' mics over the AAP mic stream (`0x58`), no call mode. Experimental | Yes |
+| Filtered hearing (the room through the AirPods minus a learned fan/hum, keyboard clicks, a tapped band, one enrolled voice, your own voice, or all speech; or voices only) | Phone (1.6.0; neural engine in 1.7.0) | AirPods' mics over `0x58`, played back over A2DP with the AirPods in Noise Cancellation; ~200+ ms delay (+30 ms for the neural engine). On-device DeepFilterNet3 + CAM++ speaker embedding (ONNX Runtime), or a Light classical engine | Yes |
+| Laptop mic tools (viewer and notch filters) | Laptop | laptop mic | Laptop only: it is a tool for the laptop's own mic and output, not a headphone feature |
+| Live Translation | Phone | AirPods' mics through Bluetooth SCO (call mode) | Yes, but it uses call mode for the session |
+| Spatial audio (HRTF) and head tracking | Laptop | AirPods' motion sensors (AAP `0x17`) | No: Android gives apps no way to render HRTF on all audio or to feed head tracking into its own spatializer |
+| Last seen and Find | Phone | BLE adverts, AAP battery and IRK | Yes (the laptop's connect log is optional) |
+| Hand-off | Phone and laptop | none | Only matters when a laptop is used too |
+
+**Crusher "adaptive".** The Crusher ANC 2 has no adaptive ANC and reports nothing it senses: over AT it only
+answers its mode and bass, and over Airoha RACE it doesn't answer the environment detection or adaptive ANC
+queries. Crusher automation is Smart adaptive (phone motion sensors, phone only) or
+[Crusher Adaptive](#crusher-adaptive-mode) on the phone, laptop and PC, which listens to the room with the
+host's own mic (or, if you turn it on, the Crusher's mic in call mode while nothing plays).
+
+**Live Translation and call mode.** Today it hears the other person through the AirPods' call mic (SCO). The AAP
+mic stream used by *What your AirPods hear* could replace that without call mode, once it is confirmed on your
+AirPods; that change is not made yet.
+
 ## How it fits together
 
 ```mermaid
@@ -202,6 +401,60 @@ flowchart LR
 
 <p align="center"><img src="docs/images/how-it-fits-together.png" width="820" alt="How it fits together (image)"></p>
 
+## Packets (Android 1.8.0)
+
+*Packets* on the main screen shows, live, every Bluetooth packet the app sends to or reads from the AirPods
+(AAP over L2CAP `0x1001`) and the Crusher (AT text over RFCOMM channel 9): time, sent or received, device, the
+bytes in hex, and what they mean, decoded with the app's own parsers (`PacketDecode.kt`). For example:
+
+```
+SENT AirPods  Set noise mode: Transparency
+     04 00 04 00 09 00 0D 03 00 00 00
+RECV AirPods  Battery: L 80% · R 75% · Case 40%
+RECV AirPods  Audio source: a device (address hidden), media
+     04 00 04 00 0E 00 xx xx xx xx xx xx 02
+SENT Crusher  Ask the noise mode
+     "AT.UIAUDIO?\r"  41 54 2E 55 49 41 55 44 49 4F 3F 0D
+```
+
+- Bluetooth addresses, serial numbers, device names and key bytes are always masked, as `xx` in the hex and
+  "(hidden)" in the text. Besides the fields known to hold them, any text inside an AAP packet (except model
+  numbers and firmware versions) and any copy of the AirPods' or Crusher's address or the AirPods' IRK is
+  hidden wherever it appears, so an unknown packet doesn't leak them either.
+- Mic-stream audio (`0x58`, ~130 packets a second) is folded into one "Mic audio x N/s" line; only its header
+  is shown.
+- The last 500 packets are kept in memory only, never written to disk. Pause, Clear, a device filter and Copy
+  (the masked text). *Read AirPods* and *Read Crusher* only ask for the current state; they change nothing.
+
+## Ear detection (Android 1.9.0)
+
+The AirPods sense on their own whether each bud is in an ear, out, or in the case, and push a report (AAP
+`0x06`) the moment it changes. 1.9.0 listens for it all the time the AirPods are on the phone and acts on it,
+like an iPhone:
+
+- **Live status** on the main screen, the widget and the Listen screen: "Left: in ear, Right: in case (live,
+  since 14:02)", or "(last seen 5 min ago)" when the link isn't open.
+- **Auto-pause**: a bud leaving an ear while media plays pauses it (the same pause key a headset button
+  sends, so no extra permission). **Auto-resume** only if the app paused it and the bud goes back within
+  2 minutes; both buds into the case means no resume. Nothing happens during a call, and auto-pause is
+  skipped while filtered hearing plays (the phone can't tell your media from it then).
+- **Listening / filtered hearing** stops when no bud is in an ear; optionally it starts again if one goes back
+  in within 2 minutes (off by default).
+- A change has to hold 0.4 s to count, so brushing a bud against your ear doesn't pause anything.
+
+Every action has its own switch under *Ear detection* (all on by default except the restart). The master switch
+"Ear detection features" turns the whole thing off. How it works: a small foreground service (`EarService`,
+type "connected device", a silent minimum-priority notification) starts when the AirPods connect and stops when
+they leave. It holds the app's **one** AAP link (`AapLink`), which everything else now shares: the mic stream,
+mode taps, settings reads and the widget send on that link instead of opening a second one, and one reader
+thread feeds the Packets log and every user of the link. It costs almost nothing: no polling, the service
+sleeps until the AirPods send something.
+
+Left or right: the report is ordered primary bud first, not left first. The app learns which bud is the primary
+from the AAP battery report (the bud that is charging is the one in the case; in that report type `02` is the
+right bud and `04` the left, which 1.9.1 and earlier had swapped) or from the BLE advert's "primary is left" bit; details in [PROTOCOL.md](docs/PROTOCOL.md#ear-detection-left-and-right-android-190). Until it knows, it says
+"One bud in ear, the other in case".
+
 ## Repository layout
 
 | Path | What it is |
@@ -214,8 +467,12 @@ flowchart LR
 | `laptop/headphone-panel.service` | A systemd user service for the panel. |
 | `laptop/apple-did.sh` | Switches BlueZ to Apple's Device ID (and back with `undo`). |
 | `windows/crusher_win.py` | Crusher control on Windows with no driver: RFCOMM through Winsock `AF_BTH` via ctypes. |
-| `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, and the Windows connection check. |
-| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`). |
+| `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, the Adaptive wedge, and the Windows connection check. |
+| `shared/crusher_adaptive.py` | Crusher Adaptive's measuring and decisions (room level, voices, the policy, rate limit, AT commands, the Crusher's mic only while nothing plays), shared by the laptop and Windows. The Android app has a Kotlin port (`CrusherAdaptive.kt`, tested by `CrusherAdaptiveTest.kt`, run by `CrusherAdaptiveService.kt`); the APK packages only `shared/*.json`. |
+| `laptop/hp_adaptive.py` | Crusher Adaptive on the laptop: the Crusher's mic (HFP profile switch and `parec`) and the is-anything-playing check. |
+| `windows/crusher_adaptive_win.py` | Crusher Adaptive on Windows: the Crusher's Hands-Free mic through winmm, the audio meters, a local API on `127.0.0.1:8971` and a CLI. |
+| `tests/` | Python unit tests (`python3 -m unittest discover -s tests`). |
+| `android/` | The home-screen widget app (Kotlin, no AndroidX), including Last seen and Find (`Tracker.kt`, `TrackActivity.kt`, `FinderActivity.kt`, the testable parts in `TrackLogic.kt`) and Live Translation (`LiveTranslateService.kt`, `TranslateActivity.kt`, and the testable decisions in `TranslateLogic.kt` / `TranslateSession.kt`) and Packets (`PacketsActivity.kt`, `PacketLog.kt`, the testable `PacketDecode.kt`) and Ear detection (`EarService.kt`, the shared link `AapLink.kt`, the testable `EarLogic.kt`). |
 | `docs/HOW-IT-WORKS.md` | The multi-device findings, with the packets that prove them. |
 | `docs/PROTOCOL.md` | The Crusher AT commands, the AAP packets, the BLE battery format and the panel API. |
 
@@ -228,7 +485,8 @@ sudo bash laptop/apple-did.sh                 # Modalias should read bluetooth:v
 # re-pair the AirPods on the laptop (the AirPods remember a host's Device ID from pairing time)
 mkdir -p ~/.config/headphone-panel ~/.local/share/headphone-panel ~/.config/systemd/user
 cp laptop/config.example.json ~/.config/headphone-panel/config.json   # fill in your addresses
-cp laptop/panel.py laptop/panel.html laptop/hp_eq.py shared/eq_presets.json ~/.local/share/headphone-panel/
+cp laptop/panel.py laptop/panel.html laptop/hp_eq.py laptop/hp_sound.py laptop/hp_adaptive.py \
+   shared/eq_presets.json shared/crusher_adaptive.py ~/.local/share/headphone-panel/
 cp laptop/headphone-panel.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now headphone-panel
 pactl set-card-profile bluez_card.<AIRPODS_MAC_WITH_UNDERSCORES> off   # control only, no audio
@@ -242,6 +500,13 @@ For the Crusher, set the `CRUSHER_MAC` environment variable and run `python wind
 No driver and no admin rights are needed. For the EQ, install Equalizer APO, tick your headphones in its
 Device Selector, then run `python windows\eq_apo.py preset bass` (keep `shared\eq_presets.json` where
 the script can find it: next to it, or at `..\shared\`).
+
+For Crusher Adaptive on the PC: `pip install numpy`, check that the Crusher's mic is found with
+`python windows\crusher_adaptive_win.py mics` (the Crusher must be connected to the PC), then turn it on with `python windows\crusher_adaptive_win.py on`
+(it starts in the background). To have it ready after a reboot, put a shortcut to
+`pythonw.exe windows\crusher_adaptive_win.py serve` in `shell:startup`; it remembers whether it was on.
+`shared\crusher_adaptive.py` must be next to the script or at `..\shared\`, like the EQ presets.
+It never opens any other input, so a PC without a mic is fine.
 
 ### Android phone
 
@@ -279,5 +544,12 @@ code (roughly 2,500 Python, 2,200 Kotlin and a 290-line web panel page), and non
 - [apple-wireshark](https://github.com/pabloaul/apple-wireshark): AAP opcode names.
 - [OpenPods](https://github.com/adolfintel/OpenPods): the BLE proximity-broadcast battery layout.
 - [AndroidHiddenApiBypass](https://github.com/LSPosed/AndroidHiddenApiBypass).
+- [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (DeepFilterNet3, Hendrik Schröter; MIT / Apache-2.0), exported for streaming with
+  the torchDF wrapper by [grazder](https://github.com/grazder/DeepFilterNet): Filtered hearing's neural noise / speech separation.
+- [3D-Speaker](https://github.com/modelscope/3D-Speaker) CAM++ speaker model (Alibaba; Apache-2.0), ONNX conversion by
+  [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0); downloaded at build time with a checksum.
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT) runs both on the phone.
+- Tests use excerpts of [LibriSpeech](https://www.openslr.org/12) test-clean (CC BY 4.0), fetched at test time, never committed.
+  Model licences and sources: `android/app/src/main/assets/models/NOTICE.txt`.
 
 Not affiliated with Apple or Skullcandy. AirPods is a trademark of Apple Inc.

@@ -17,6 +17,10 @@ Usage:
   python crusher_win.py anc-filter <n>|off        # ANC filter id (range not known)
   python crusher_win.py volume up|down [steps]
   python crusher_win.py probe                     # read-only: which extra commands this firmware answers
+  python crusher_win.py connected                 # is the Crusher connected to this PC (no RFCOMM, ~1 ms)
+
+A mode set here (anc / transparency) counts as a manual change: if Crusher Adaptive is running
+(crusher_adaptive_win.py), it pauses for its "after a manual change" time.
 
 The extras come from Skull-iQ's AT code (generic Bragi AT commands); not every firmware answers all of
 them, so `state` only shows the ones that replied OK. See docs/PROTOCOL.md.
@@ -48,6 +52,7 @@ class GUID(ctypes.Structure):
 
 
 class SOCKADDR_BTH(ctypes.Structure):
+    _pack_ = 1   # ws2bth.h packs it (30 bytes); unpacked, btAddr lands 6 bytes off -> WSAEADDRNOTAVAIL (10049)
     _fields_ = [("addressFamily", ctypes.c_ushort), ("btAddr", ctypes.c_ulonglong),
                 ("serviceClassId", GUID), ("port", ctypes.c_ulong)]
 
@@ -110,6 +115,55 @@ class Crusher:
             pass
 
 
+def bt_connected(addr=MAC_INT):
+    """True if the paired Crusher has a live link to this PC's radio (BluetoothApis, ~1 ms, no RFCOMM)."""
+    from ctypes import wintypes
+
+    class SYSTEMTIME(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ushort) for n in ("y", "mo", "dow", "d", "h", "mi", "s", "ms")]
+
+    class BDI(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("Address", ctypes.c_ulonglong), ("cod", wintypes.ULONG),
+                    ("fConnected", wintypes.BOOL), ("fRemembered", wintypes.BOOL),
+                    ("fAuthenticated", wintypes.BOOL), ("seen", SYSTEMTIME), ("used", SYSTEMTIME),
+                    ("name", ctypes.c_wchar * 248)]
+
+    class FRP(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD)]
+
+    bt = ctypes.WinDLL("BluetoothApis.dll")
+    k32 = ctypes.WinDLL("kernel32")
+    bt.BluetoothFindFirstRadio.restype = wintypes.HANDLE
+    bt.BluetoothFindFirstRadio.argtypes = [ctypes.POINTER(FRP), ctypes.POINTER(wintypes.HANDLE)]
+    bt.BluetoothFindRadioClose.argtypes = [wintypes.HANDLE]
+    bt.BluetoothGetDeviceInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(BDI)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    p, h = FRP(ctypes.sizeof(FRP)), wintypes.HANDLE()
+    find = bt.BluetoothFindFirstRadio(ctypes.byref(p), ctypes.byref(h))
+    if not find:
+        return False
+    try:
+        info = BDI()
+        info.dwSize, info.Address = ctypes.sizeof(BDI), addr
+        return bt.BluetoothGetDeviceInfo(h, ctypes.byref(info)) == 0 and bool(info.fConnected)
+    finally:
+        bt.BluetoothFindRadioClose(find)
+        k32.CloseHandle(h)
+
+
+ADAPTIVE_URL = "http://127.0.0.1:8971"       # crusher_adaptive_win.py, if it runs
+
+
+def tell_adaptive_manual():
+    """A mode was set by hand: let Crusher Adaptive step aside. Nothing happens if it isn't running."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(urllib.request.Request(ADAPTIVE_URL + "/manual", data=b"", method="POST"),
+                               timeout=0.5).close()
+    except Exception:
+        pass
+
+
 EXTRA_Q = {"transparency_level": "AT.UIAUDIO=transparency", "at_on_call": "AT.UIAUDIO=atoncall",
            "at_on_pause": "AT.UIAUDIO=atonpause", "anc_filter": "AT.UIAUDIO=anc_filter"}
 
@@ -148,6 +202,11 @@ def read_state(c):
 
 def main():
     a = sys.argv[1:] or ["state"]
+    if a[0] == "connected":
+        print("yes" if bt_connected() else "no")
+        return
+    if a[0] in ("anc", "transparency", "transparency-level"):
+        tell_adaptive_manual()
     c = Crusher()
     try:
         if a[0] == "state":

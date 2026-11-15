@@ -10,3 +10,4 @@ android/device.properties
 android/keystore.properties
 *.jks
 *.keystore
+android/testdata/
