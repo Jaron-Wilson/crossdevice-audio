@@ -21,8 +21,8 @@ android {
         applicationId = "dev.jaronwilson.headphones"
         minSdk = 31
         targetSdk = 35
-        versionCode = 36
-        versionName = "1.9.3"
+        versionCode = 37
+        versionName = "1.10.0"
         // ML Kit's translate/language-id native libraries are large; Android 12+ phones are 64-bit ARM
         ndk { abiFilters += listOf("arm64-v8a") }
     }
@@ -31,8 +31,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    // the EQ bands and presets: one shared file for the phone, the laptop panel and Windows
-    sourceSets["main"].assets.srcDir("../../shared")
+    // the EQ bands and presets: one shared file for the phone, the laptop panel and Windows. Only the JSON is
+    // packaged (copySharedAssets below), not shared/*.py or its __pycache__.
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/shared-assets"))
     // Filtered hearing's speaker model: downloaded at build time (see fetchModels below), not committed
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/fh-models"))
     // ONNX Runtime's native library is 36 MB; compressed in the APK it is about a third of that (the phone
@@ -106,5 +107,10 @@ val fetchModels by tasks.registering {
         tmp.renameTo(f)
     }
 }
-tasks.named("preBuild") { dependsOn(fetchModels) }
+// shared/ also holds the laptop's and Windows' Python; the APK gets only the shared JSON data
+val copySharedAssets by tasks.registering(Sync::class) {
+    from("../../shared") { include("*.json") }
+    into(layout.buildDirectory.dir("generated/shared-assets"))
+}
+tasks.named("preBuild") { dependsOn(fetchModels, copySharedAssets) }
 tasks.withType<Test>().configureEach { dependsOn(fetchModels) }

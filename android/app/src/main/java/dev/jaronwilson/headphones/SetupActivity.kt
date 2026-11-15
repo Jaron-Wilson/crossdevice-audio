@@ -81,6 +81,20 @@ class SetupActivity : Activity() {
     private val earSw = LinkedHashMap<String, Switch>()
     private val earWatch: () -> Unit = { runOnUiThread { bindEar(Handoff.local(this)) } }
     private val crSwitches = LinkedHashMap<String, Switch>()
+    private lateinit var adSw: Switch
+    private lateinit var adStatus: TextView
+    private lateinit var adSens: SeekBar
+    private lateinit var adSensText: TextView
+    private lateinit var adConv: Switch
+    private lateinit var adDuck: Switch
+    private lateinit var adHeadset: Switch
+    private lateinit var adPause: Spinner
+    private val adPauseMins = listOf(5, 10, 30, 0)
+    private val adPoll = object : Runnable {
+        override fun run() {
+            if (::adStatus.isInitialized) { refreshAdaptiveStatus(); adStatus.postDelayed(this, 1000) }
+        }
+    }
     private var lastEqPush = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,6 +105,18 @@ class SetupActivity : Activity() {
             (if (android.os.Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.POST_NOTIFICATIONS) else emptyArray()))
             .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1) else loadDevices()
+        handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    /** The widget's Adaptive button lands here: Android only lets a visible app start the microphone. */
+    private fun handleIntent(i: Intent?) {
+        if (i?.action == CrusherAdaptiveCtl.ACTION_ON) { i.action = null; toggleAdaptive(true) }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
@@ -99,6 +125,11 @@ class SetupActivity : Activity() {
             REQ_ACTIVITY -> {
                 if (!granted) { for (dev in SmartAdaptive.DEVICES) SmartAdaptive.setEnabled(this, dev, false); toast("Smart adaptive needs the Physical activity permission") }
                 SmartAdaptive.sync(this); refreshSmart()
+            }
+            REQ_MIC -> {
+                if (granted) { setAdaptiveOn(true) }
+                else { toast("Crusher Adaptive needs the microphone to hear the room, so it stays off") }
+                refreshAdaptive()
             }
             REQ_PHONE -> {
                 SmartAdaptive.setCallAware(this, granted)
@@ -114,18 +145,22 @@ class SetupActivity : Activity() {
         loadControls()
         if (::smartNote.isInitialized) { SmartAdaptive.sync(this); refreshSmart() }
         EarService.sync(this)
+        CrusherAdaptiveCtl.sync(this)
+        if (::adSw.isInitialized) { refreshAdaptive(); adStatus.removeCallbacks(adPoll); adStatus.post(adPoll) }
         Ears.watch(earWatch)
         if (::earLive.isInitialized) bindEar(Handoff.local(this))
     }
 
     override fun onPause() {
         super.onPause()
+        if (::adStatus.isInitialized) adStatus.removeCallbacks(adPoll)
         Ears.unwatch(earWatch)
     }
 
     private companion object {
         const val REQ_ACTIVITY = 2
         const val REQ_PHONE = 3
+        const val REQ_MIC = 4
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -277,10 +312,11 @@ class SetupActivity : Activity() {
         crBox.addView(label("Crusher ANC 2", 15f, "#E8EDF2"))
         val cr = card()
         cr.addView(label("Noise mode", 13f, "#E8EDF2"))
-        cr.addView(modeRow(crModeBtns, listOf("anc" to "ANC", "transparency" to "Clear", "off" to "Off")) { setCrMode(it) })
+        cr.addView(modeRow(crModeBtns, listOf("adaptive" to "Adaptive", "anc" to "ANC", "transparency" to "Clear", "off" to "Off")) { setCrMode(it) })
         cr.addView(TextView(this).apply {
-            text = "The Crusher has no adaptive mode and reports no outside-noise level, so these are set by you " +
-                "(or by Smart adaptive below, from the phone's motion sensors)."
+            text = "The Crusher has no adaptive mode of its own and reports no outside-noise level. Adaptive is done by " +
+                "this phone listening to the room (see Crusher Adaptive below); ANC, Clear and Off are set by you " +
+                "(or by Smart adaptive, from the phone's motion sensors). Picking one by hand pauses Adaptive."
             textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(4), 0, dp(4))
         })
         crBassText = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#E8EDF2")); setPadding(0, dp(8), 0, 0) }
@@ -302,9 +338,132 @@ class SetupActivity : Activity() {
         cr.addView(crFeat)
         crBox.addView(cr)
         col.addView(crBox)
+        buildAdaptive(col)
         buildEars(col)
         buildSmart(col)
         refreshEq()
+    }
+
+    // ---- Crusher Adaptive ----
+    private fun buildAdaptive(col: LinearLayout) {
+        col.addView(label("Crusher Adaptive", 15f, "#E8EDF2"))
+        val c = card()
+        c.addView(TextView(this).apply {
+            text = "An Adaptive mode for the Crusher, which has none. This phone listens to the room with its own " +
+                "microphone and moves the Crusher between ANC, Transparency and Off: quiet room, Transparency; " +
+                "loud or steady noise, ANC; someone talking nearby, Transparency up high, back a few seconds after they stop. " +
+                "The microphone is open only while this is on and the Crusher is connected to this phone. Nothing is " +
+                "recorded or sent anywhere: each moment of sound is measured as a number and dropped."
+            textSize = 12f; setTextColor(Color.parseColor("#8AA6B4")); setPadding(0, dp(8), 0, dp(4))
+        })
+        adSw = switch("Crusher Adaptive") { on -> toggleAdaptive(on) }.also { c.addView(it) }
+        adStatus = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#99FFBB")) }.also { c.addView(it) }
+        adSensText = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#E8EDF2")); setPadding(0, dp(8), 0, 0) }
+        c.addView(adSensText)
+        adSens = SeekBar(this).apply {
+            max = 100
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, v: Int, fromUser: Boolean) { adSensText.text = "Sensitivity: $v (higher reacts to quieter noise)" }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) { if (!binding) CrusherAdaptiveCtl.update(this@SetupActivity, mapOf("sensitivity" to sb.progress)) }
+            })
+        }
+        c.addView(adSens)
+        c.addView(ends("Only loud noise", "Even quiet noise"))
+        adConv = switch("Conversation awareness (Transparency when someone talks)") { on ->
+            CrusherAdaptiveCtl.update(this, mapOf("conversation" to on)) }.also { c.addView(it) }
+        adDuck = switch("Lower the media while someone talks") { on ->
+            CrusherAdaptiveCtl.update(this, mapOf("duck" to on)) }.also { c.addView(it) }
+        val pr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        pr.addView(TextView(this).apply { text = "After I change the mode by hand, pause"; textSize = 13f
+            setTextColor(Color.parseColor("#E8EDF2")) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        adPause = Spinner(this).apply {
+            adapter = ArrayAdapter(this@SetupActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("5 minutes", "10 minutes", "30 minutes", "until I pick Adaptive"))
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                    if (!binding) CrusherAdaptiveCtl.update(this@SetupActivity, mapOf("pause_min" to adPauseMins[pos]))
+                }
+                override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
+            }
+        }
+        pr.addView(adPause, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.2f))
+        c.addView(pr)
+        adHeadset = switch("Use the headset mic when nothing is playing (call quality while it listens)") { on -> toggleHeadsetMic(on) }
+            .also { c.addView(it) }
+        c.addView(TextView(this).apply {
+            text = "Warning: the headset mic works over Bluetooth call mode (HFP). While it listens, the Crusher is in " +
+                "call mode: its sound is call quality and a mode change on the headset can be reported late. It is used " +
+                "only after nothing has played for 10 seconds, and it is dropped the moment media plays (back to " +
+                "music quality), then the phone mic takes over. Off by default; the phone mic is used otherwise."
+            textSize = 12f; setTextColor(Color.parseColor("#FFB86B")); setPadding(0, 0, 0, dp(4))
+        })
+        col.addView(c, lp(0))
+        refreshAdaptive()
+    }
+
+    private fun refreshAdaptive() {
+        if (!::adSw.isInitialized) return
+        val st = CrusherAdaptiveCtl.settings(this)
+        binding = true
+        adSw.isChecked = st.enabled
+        adSens.progress = st.sensitivity
+        adSensText.text = "Sensitivity: ${st.sensitivity} (higher reacts to quieter noise)"
+        adConv.isChecked = st.conversation
+        adDuck.isChecked = st.duck
+        adHeadset.isChecked = st.headsetMic
+        adPause.setSelection(adPauseMins.indexOf(st.pauseMin).let { if (it < 0) 1 else it })
+        binding = false
+        refreshAdaptiveStatus()
+    }
+
+    private fun refreshAdaptiveStatus() {
+        if (!::adStatus.isInitialized) return
+        val t = CrusherAdaptiveCtl.statusLine(this)
+        adStatus.text = t
+        adStatus.visibility = if (t.isEmpty()) View.GONE else View.VISIBLE
+        if (::adSw.isInitialized && CrusherAdaptiveCtl.enabled(this) != adSw.isChecked) {
+            binding = true; adSw.isChecked = CrusherAdaptiveCtl.enabled(this); binding = false
+        }
+        if (CrusherAdaptiveCtl.active(this)) colorModes(crModeBtns, "adaptive")
+        else if (crModeBtns["adaptive"]?.currentTextColor == Color.parseColor("#5FD0FF")) colorModes(crModeBtns, null)
+    }
+
+    /** Turning it on needs the microphone: ask first, and stay off if it is refused. */
+    private fun toggleAdaptive(on: Boolean) {
+        if (!on) { CrusherAdaptiveCtl.setEnabled(this, false); refreshAdaptive(); return }
+        if (CrusherAdaptiveCtl.hasMicPermission(this)) { setAdaptiveOn(true); return }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Microphone")
+            .setMessage("Crusher Adaptive listens to the room through this phone's microphone to tell quiet from noisy and to hear when someone talks. " +
+                "It measures the loudness and drops the sound at once: nothing is recorded, stored or sent anywhere. " +
+                "The microphone is open only while Adaptive is on and the Crusher is connected, and Android shows its microphone indicator while it is.")
+            .setPositiveButton("Continue") { _, _ -> requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC) }
+            .setNegativeButton("Cancel") { _, _ -> refreshAdaptive() }
+            .setOnCancelListener { refreshAdaptive() }
+            .show()
+        refreshAdaptive()
+    }
+
+    private fun setAdaptiveOn(on: Boolean) {
+        val smart = SmartAdaptive.enabled(this, SmartAdaptive.CRUSHER)
+        CrusherAdaptiveCtl.setEnabled(this, on)
+        if (on && smart) toast("Smart adaptive for the Crusher turned off, so the two don't fight")
+        refreshAdaptive(); refreshSmart()
+        adStatus.postDelayed({ refreshAdaptive(); loadControls() }, 1500)
+    }
+
+    private fun toggleHeadsetMic(on: Boolean) {
+        if (!on) { CrusherAdaptiveCtl.update(this, mapOf("headset_mic" to false)); return }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Use the headset mic?")
+            .setMessage("While nothing is playing, Adaptive will listen through the Crusher's own microphone over Bluetooth call mode. " +
+                "The Crusher then sounds like a phone call (low quality) until media plays, when it goes back to music quality and the phone mic is used. " +
+                "Voice assistants or calls may also pick up the headset at those moments. Keep this off if you notice anything odd.")
+            .setPositiveButton("Turn on") { _, _ -> CrusherAdaptiveCtl.update(this, mapOf("headset_mic" to true)) }
+            .setNegativeButton("Cancel") { _, _ -> refreshAdaptive() }
+            .setOnCancelListener { refreshAdaptive() }
+            .show()
     }
 
     // ---- Ear detection ----
@@ -393,6 +552,11 @@ class SetupActivity : Activity() {
     }
 
     private fun toggleSmart(dev: String, on: Boolean) {
+        if (on && dev == SmartAdaptive.CRUSHER && CrusherAdaptiveCtl.enabled(this)) {
+            CrusherAdaptiveCtl.setEnabled(this, false)       // the two would fight over the Crusher's mode
+            toast("Crusher Adaptive turned off, so the two don't fight")
+            refreshAdaptive()
+        }
         SmartAdaptive.setEnabled(this, dev, on)
         if (on && !SmartAdaptive.hasActivityPermission(this)) {
             android.app.AlertDialog.Builder(this)
@@ -496,7 +660,8 @@ class SetupActivity : Activity() {
         }
         crBox.visibility = if (cr != null) View.VISIBLE else View.GONE
         if (cr != null) {
-            colorModes(crModeBtns, when { cr.optBoolean("anc") -> "anc"; cr.optBoolean("transparency") -> "transparency"; else -> "off" })
+            colorModes(crModeBtns, if (CrusherAdaptiveCtl.active(this)) "adaptive"
+                else when { cr.optBoolean("anc") -> "anc"; cr.optBoolean("transparency") -> "transparency"; else -> "off" })
             if (cr.has("bass")) crBass.progress = cr.optInt("bass")
             crBassText.text = if (cr.has("bass")) "Sensory bass level: ${crBass.progress} / 10" else "Sensory bass level: unknown"
             crBassOn.visibility = if (cr.has("bass_on")) View.VISIBLE else View.GONE
@@ -596,6 +761,8 @@ class SetupActivity : Activity() {
     }
 
     private fun setCrMode(mode: String) {
+        if (mode == "adaptive") { toggleAdaptive(true); return }
+        CrusherAdaptiveCtl.manual(this, "picked in the app")      // by hand: Adaptive steps aside for a while
         val app = applicationContext
         io.execute {
             val r = runCatching {

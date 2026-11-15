@@ -195,7 +195,9 @@ flowchart TB
   or USB mic, or the headset mic option. "Lower media" uses the Crusher's own volume (`AT.VOLUME`), if the
   firmware answers it. `crusher_adaptive_win.py measure` prints the room level and the voices flag without
   touching the Crusher, to pick a sensitivity; `measure --headset` does the same through the Crusher's mic.
-- **Android (1.10.0).** On the app screen next to the Crusher's modes, with the same settings. The phone's
+- **Android (1.10.0).** On the app screen next to the Crusher's modes (and an *Adaptive* button on the
+  widget, which opens the app to start it, since Android only lets a visible app start the mic), with the
+  same settings. The phone's
   mic is read through `AudioRecord` in a microphone foreground service that runs only while Crusher Adaptive
   is on (Android shows its "mic in use" dot); the commands go through the app's own AT link. Turning it on
   turns Smart adaptive off for the Crusher, and the other way round, so the two never fight.
@@ -468,7 +470,7 @@ right bud and `04` the left, which 1.9.1 and earlier had swapped) or from the BL
 | `laptop/apple-did.sh` | Switches BlueZ to Apple's Device ID (and back with `undo`). |
 | `windows/crusher_win.py` | Crusher control on Windows with no driver: RFCOMM through Winsock `AF_BTH` via ctypes. |
 | `ring/audio_ring_excerpt.py` | The Audio part of the Alt+Q ring: fan geometry, capability filtering, the Adaptive wedge, and the Windows connection check. |
-| `shared/crusher_adaptive.py` | Crusher Adaptive's measuring and decisions (room level, voices, the policy, rate limit, AT commands), shared by the laptop and Windows. |
+| `shared/crusher_adaptive.py` | Crusher Adaptive's measuring and decisions (room level, voices, the policy, rate limit, AT commands, host or headset mic), shared by the laptop and Windows. The Android app has a Kotlin port (`CrusherAdaptive.kt`, tested by `CrusherAdaptiveTest.kt`, run by `CrusherAdaptiveService.kt`); the APK packages only `shared/*.json`. |
 | `laptop/hp_adaptive.py` | Crusher Adaptive on the laptop: the laptop mic through `parec`, the speakers-playing check and media ducking. |
 | `windows/crusher_adaptive_win.py` | Crusher Adaptive on Windows: the PC mic through winmm, a local API on `127.0.0.1:8971` and a CLI. |
 | `tests/` | Python unit tests (`python3 -m unittest discover -s tests`). |

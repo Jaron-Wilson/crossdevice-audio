@@ -49,6 +49,7 @@
         <activity
             android:name=".SetupActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -114,6 +115,12 @@
         <!-- Live Translation: holds the AirPods' mic (Bluetooth SCO) while a session runs -->
         <service
             android:name=".LiveTranslateService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Crusher Adaptive: the phone's mic (or, if chosen, the Crusher's) hears the room only while it is on -->
+        <service
+            android:name=".CrusherAdaptiveService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
