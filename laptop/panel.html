@@ -34,7 +34,23 @@ select{font:15px system-ui;background:#273345;color:#fff;border:0;border-radius:
  <div class=card><div class=k>Listening mode</div><div class=seg>
   <button id=cr_anc onclick="cr('anc')">ANC</button>
   <button id=cr_tr onclick="cr('transparency')">Transparency</button>
-  <button id=cr_off onclick="cr('off')">Off</button></div></div>
+  <button id=cr_off onclick="cr('off')">Off</button>
+  <button id=cr_ad onclick="cr('adaptive')" class=off>Adaptive</button></div>
+  <div class=note id=cr_ad_line></div></div>
+ <div class="card off" id=cr_adcard><div class=k>Adaptive (the laptop listens to the room)</div>
+  <div class=row><div><span class=pk id=ad_db>–</span> <span class=note id=ad_zone></span></div><div class=note id=ad_now style="text-align:right"></div></div>
+  <div class=note id=ad_st></div>
+  <div style="margin-top:10px">Sensitivity</div>
+  <input id=ad_sens type=range min=0 max=100 step=5 onchange="adset({sensitivity:+this.value})">
+  <div class=ends><span>only loud noise</span><span>reacts to quieter noise</span></div>
+  <div class=tg><div>Conversation awareness<small>Someone talking nearby: Transparency up, back about 5 s after they stop.</small></div><div class=sw id=ad_conv onclick="adset({conversation:!this.classList.contains('on')})"></div></div>
+  <div class=tg><div>Lower media while they talk</div><div class=sw id=ad_duck onclick="adset({duck:!this.classList.contains('on')})"></div></div>
+  <div class=row style="margin-top:8px"><span>Mic</span><select id=ad_mic onchange="adset({mic:this.value})"></select></div>
+  <div class=row style="margin-top:8px"><span>After a manual change</span><select id=ad_pause onchange="adset({pause_min:+this.value})">
+   <option value=5>pause 5 min</option><option value=10>pause 10 min</option><option value=30>pause 30 min</option><option value=0>stay off until I pick Adaptive</option></select></div>
+  <div class=note>Uses the laptop's own microphone, never the Crusher's (that would switch it to call mode). It adapts to the room around the laptop, not to your ear. Only loudness numbers are kept; no sound is recorded or sent anywhere.</div>
+  <div class=row style="margin-top:8px"><button class=small onclick="adset({enabled:false})">Turn Adaptive off</button></div>
+ </div>
  <div class=card><div class=k>Sensory bass (haptic)</div>
   <div class=row><input id=cr_bass type=range min=0 max=10 step=1 onchange="crbass(this.value)"><span class=lvl id=cr_lvl>–</span></div>
   <div class=tg id=cr_bass_on_row><div>Sensory bass on</div><div class=sw id=cr_bass_on onclick="crset('bass_on',!this.classList.contains('on'))"></div></div>
@@ -171,7 +187,9 @@ async function block(level,mode){mode=mode||'adaptive';apLvlBusy=Date.now();
  apLvlBusy=0;load();}
 async function load(){let s=await (await fetch('/api/state')).json();S=s;
  let c=s.crusher||{};
- cr_anc.className=c.anc?'on':'';cr_tr.className=c.transparency?'on':'';cr_off.className=(c.online&&!c.anc&&!c.transparency)?'on':'';
+ const ad=c.adaptive||{},adOn=!!(ad.available&&ad.enabled&&!ad.paused);
+ cr_anc.className=c.anc&&!adOn?'on':'';cr_tr.className=c.transparency&&!adOn?'on':'';cr_off.className=(c.online&&!c.anc&&!c.transparency&&!adOn)?'on':'';
+ renderAd(ad);
  $('cr').className=c.online?'':'off';
  if(c.bass!=null){cr_bass.value=c.bass;cr_lvl.textContent=c.bass+'/'+(c.bass_max||10);}
  $('cr_bass_on_row').className=c.bass_on==null?'tg off':'tg';sw('cr_bass_on',c.bass_on);
@@ -226,6 +244,22 @@ async function apset(name,value){const r=await post('/api/airpods/setting',JSON.
 async function crset(name,value){await post('/api/crusher/setting',JSON.stringify({name,value}));setTimeout(load,400)}
 async function rumble(device,on){const r=await post('/api/rumble',JSON.stringify({device,on}));if(r.ok){S.rumble=await r.json();sw('rb_'+device,S.rumble[device]);}setTimeout(load,600);}
 async function cr(m){await post('/api/crusher/mode',m);setTimeout(load,400)}
+let AD={},adT=0;
+function renderAd(ad){AD=ad||{};const av=!!AD.available;$('cr_ad').className=av?(AD.enabled&&!AD.paused?'on':''):'off';
+ $('cr_adcard').className=av&&AD.enabled?'card':'card off';
+ $('cr_ad_line').textContent=!av?(AD.error?'Adaptive: '+AD.error:''):AD.enabled?(AD.paused?'Adaptive is paused after a manual change'+(AD.paused_for_s!=null?` (${Math.ceil(AD.paused_for_s/60)} min left)`:' (pick Adaptive to resume)')+'.':''):'';
+ if(!av||!AD.enabled)return;
+ $('ad_db').textContent=AD.ambient_db!=null?Math.round(AD.ambient_db)+' dB':'–';
+ const zone={quiet:'quiet',moderate:'some noise',loud:'loud'}[AD.zone]||'';
+ $('ad_zone').textContent=[zone,AD.steady?'steady':'',AD.speech?'voices':''].filter(Boolean).join(' · ');
+ $('ad_now').textContent=AD.target?'now: '+AD.target.label:'';
+ $('ad_st').textContent=(AD.status||'')+(AD.error?' · '+AD.error:'')+(AD.thresholds?` · quiet below ${Math.round(AD.thresholds.quiet_max)} dB, loud above ${Math.round(AD.thresholds.loud_min)} dB`:'');
+ const st=AD.settings||{};if(document.activeElement!==$('ad_sens'))$('ad_sens').value=st.sensitivity;
+ sw('ad_conv',!!st.conversation);sw('ad_duck',!!st.duck);$('ad_pause').value=String(st.pause_min);
+ if(AD.mics){const m=$('ad_mic'),cur=st.mic||'';m.innerHTML='<option value="">automatic (laptop mic)</option>'+AD.mics.map(x=>`<option value="${x.id}">${x.label}${x.muted?' (muted)':''}</option>`).join('');m.value=cur;}
+ clearTimeout(adT);if(!document.hidden&&!AD.paused)adT=setTimeout(adPoll,1500);}
+async function adPoll(){try{const ad=await (await fetch('/api/crusher/adaptive')).json();renderAd(ad);}catch(e){}}
+async function adset(o){const r=await post('/api/crusher/adaptive',JSON.stringify(o));if(r.ok)renderAd(await r.json());setTimeout(load,400);}
 async function crbass(v){cr_lvl.textContent=v+'/10';await post('/api/crusher/bass',v)}
 async function ap(m){await post('/api/airpods/mode',m);setTimeout(load,500)}
 // ---- sound viewer ----

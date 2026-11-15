@@ -4,6 +4,8 @@ Only the Audio part is shown:
   * fan geometry: the Audio wedge "pies out" into an outer band of choices, picked by angle;
   * audio_children(): the fan only offers controls a connected device can actually do;
   * eq_cycle(): the "EQ" wedge steps through the shared EQ presets (laptop: panel API, PC: Equalizer APO);
+  * adaptive_pick(): the "Adaptive" wedge, for the AirPods (their own Adaptive) and the Crusher (Crusher
+    Adaptive: the laptop's or PC's mic decides its mode, see shared/crusher_adaptive.py);
   * win_bt_connected(): driver-free "is this headset connected?" on Windows (BluetoothApis, ~1 ms);
   * a background poller, so opening the ring never waits on Bluetooth.
 """
@@ -55,11 +57,13 @@ AIRPODS_ADDR = 0xAABBCCDDEE02          # AirPods Pro 2: ANC, transparency, adapt
 HP_PANEL_LOCAL = "http://127.0.0.1:8970"                        # panel.py on the laptop
 HP_PANEL_LAPTOP = "https://your-laptop.your-tailnet.ts.net:8970"  # same panel, from the PC
 EQ_APO_SCRIPT = r"C:\path\to\crossdevice-audio\windows\eq_apo.py"  # PC: writes Equalizer APO config
+CRUSHER_ADAPTIVE_SCRIPT = r"C:\path\to\crossdevice-audio\windows\crusher_adaptive_win.py"  # PC: Crusher Adaptive
 
 
 def audio_children(caps: dict, linux: bool) -> list[dict]:
     """The Audio fan's items. Volume and transport always; a headphone control only when a
-    connected device can actually do it (bass = Crusher only, adaptive = AirPods only).
+    connected device can actually do it (bass = Crusher only; adaptive = AirPods, and the Crusher when
+    Crusher Adaptive is available on this machine: caps["crusher_adaptive"]).
     The EQ wedge appears when a source-side EQ exists on this machine (caps["eq"]) and the fan has room."""
     cr, ap = bool(caps.get("crusher")), bool(caps.get("airpods"))
     who = "both" if cr and ap else ("Crusher" if cr else "AirPods")
@@ -68,8 +72,10 @@ def audio_children(caps: dict, linux: bool) -> list[dict]:
     if cr or ap:
         kids += [{"key": "anc", "title": "ANC", "sub": who, "icon": "sound"},
                  {"key": "transparency", "title": "Clear", "sub": who, "icon": "sound"}]
-    if ap:
-        kids.append({"key": "adaptive", "title": "Adaptive", "sub": "AirPods", "icon": "sound"})
+    cra = cr and bool(caps.get("crusher_adaptive"))
+    if ap or cra:
+        kids.append({"key": "adaptive", "title": "Adaptive",
+                     "sub": "both" if ap and cra else ("AirPods" if ap else "Crusher"), "icon": "sound"})
     if cr:
         kids += [{"key": "bassdown", "title": "Bass −", "sub": "Crusher", "icon": "sound"},
                  {"key": "bassup", "title": "Bass +", "sub": "Crusher", "icon": "sound"}]
@@ -99,6 +105,30 @@ def eq_cycle(linux: bool) -> str:
         st = json.loads(out.stdout.strip().splitlines()[-1])
     labels = {"flat": "Flat", "bass": "Bass boost", "vocal": "Vocal", "treble": "Treble"}
     return labels.get(st.get("preset"), "Custom")
+
+
+def adaptive_pick(caps: dict, linux: bool) -> str:
+    """The Adaptive wedge: AirPods -> their Adaptive mode (through the panel); Crusher -> Crusher Adaptive
+    (the panel on the laptop, crusher_adaptive_win.py on the PC, which starts its daemon if needed).
+    Picking ANC / Clear for the Crusher afterwards pauses Crusher Adaptive (the panel and crusher_win.py
+    tell it), so a manual choice always wins. Returns the ring's toast text."""
+    import urllib.request
+    done = []
+    if caps.get("airpods"):
+        base = HP_PANEL_LOCAL if linux else HP_PANEL_LAPTOP
+        req = urllib.request.Request(base + "/api/airpods/mode", data=b"adaptive", method="POST")
+        urllib.request.urlopen(req, timeout=8).close()
+        done.append("AirPods")
+    if caps.get("crusher") and caps.get("crusher_adaptive"):
+        if linux:
+            req = urllib.request.Request(HP_PANEL_LOCAL + "/api/crusher/mode", data=b"adaptive", method="POST")
+            urllib.request.urlopen(req, timeout=8).close()
+        else:  # pragma: no cover - needs Windows
+            import subprocess
+            import sys
+            subprocess.run([sys.executable, CRUSHER_ADAPTIVE_SCRIPT, "on"], capture_output=True, timeout=20)
+        done.append("Crusher")
+    return "Adaptive: " + " + ".join(done) if done else "Adaptive: nothing connected"
 
 
 def win_bt_connected(addr: int) -> bool:  # pragma: no cover - needs Windows
@@ -163,8 +193,12 @@ class HeadphoneCaps:
     def _hp_caps_now(self) -> dict:
         if self.linux:
             c = _panel_caps(HP_PANEL_LOCAL, 3)
-            return {"crusher": bool(c.get("crusher")), "airpods": bool(c.get("airpods")), "eq": bool(c.get("eq"))}
-        caps = {"crusher": win_bt_connected(CRUSHER_ADDR), "airpods": False, "eq": _win_has_apo()}
+            return {"crusher": bool(c.get("crusher")), "airpods": bool(c.get("airpods")), "eq": bool(c.get("eq")),
+                    "crusher_adaptive": bool(c.get("crusher_adaptive"))}
+        import os
+        cr = win_bt_connected(CRUSHER_ADDR)
+        caps = {"crusher": cr, "airpods": False, "eq": _win_has_apo(),
+                "crusher_adaptive": cr and os.path.isfile(CRUSHER_ADAPTIVE_SCRIPT)}
         # AirPods modes go through the laptop, which holds their control link as a 2nd host.
         if win_bt_connected(AIRPODS_ADDR):
             caps["airpods"] = bool(_panel_caps(HP_PANEL_LAPTOP, 4).get("airpods"))
@@ -176,7 +210,7 @@ class HeadphoneCaps:
             try:
                 caps = self._hp_caps_now()
             except Exception:  # noqa: BLE001 - panel down / radio off: no headphone controls
-                caps = {"crusher": False, "airpods": False, "eq": False}
+                caps = {"crusher": False, "airpods": False, "eq": False, "crusher_adaptive": False}
             self._hp_caps = caps
             if caps != last:
                 self.ctx.log("flow: headphone controls: %s", caps)
