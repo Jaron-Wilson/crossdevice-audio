@@ -654,8 +654,8 @@ def sound_state():
             "sources": hp_sound.sources(), "listening": SOUND.source, "bins": SOUND.bin_centers(),
             "notch": {k: n.state() for k, n in NOTCH.items()}}
 
-# ---- Crusher Adaptive: the laptop mic hears the room, the Crusher's mode follows (hp_adaptive.py,
-# shared/crusher_adaptive.py). Off until turned on; the mic is open only while it runs.
+# ---- Crusher Adaptive: the Crusher's own mic hears the room (only while nothing plays), the Crusher's mode
+# follows (hp_adaptive.py, shared/crusher_adaptive.py). Off until turned on; the laptop's mics are never used.
 def _cr_send(cmds):
     with CR_LOCK: rs = cr_at_each(cmds)
     bad = [c for c, r in zip(cmds, rs) if "ERROR" in r or not r.strip()]
@@ -679,7 +679,7 @@ try:
     ADAPTIVE = hp_adaptive.make_runner(
         send=_cr_send, read_mode=_cr_mode_now, connected=crusher_connected,
         has_level=lambda: "transparency_level" in (crusher_extras() or {}),
-        log=lambda m: print(m, flush=True)).start()
+        log=lambda m: print(m, flush=True), mac=CR_MAC).start()
     ADAPTIVE_ERR = "" if ADAPTIVE.state()["available"] else "numpy is not installed"
 except Exception as e:
     ADAPTIVE = None; ADAPTIVE_ERR = str(e)
@@ -687,7 +687,6 @@ def adaptive_state(full=False):
     if not ADAPTIVE: return {"available": False, "error": ADAPTIVE_ERR}
     st = ADAPTIVE.state()
     if not st["available"]: st["error"] = ADAPTIVE_ERR
-    if full: st["mics"] = hp_adaptive.mics()
     return st
 def crusher_manual():
     """A Crusher mode was picked by hand: Adaptive steps aside (for its pause time)."""
@@ -778,9 +777,7 @@ class H(BaseHTTPRequestHandler):
             if self.path=="/api/crusher/adaptive":
                 if not ADAPTIVE: return self._s(503,json.dumps({"error":ADAPTIVE_ERR}))
                 j=json.loads(body or "{}")
-                if j.get("mic") and j["mic"] not in [m["id"] for m in hp_adaptive.mics()]:
-                    return self._s(400,json.dumps({"error":"unknown microphone"}))
-                keep={k:v for k,v in j.items() if k in ("enabled","sensitivity","conversation","duck","mic","pause_min")}
+                keep={k:v for k,v in j.items() if k in ("enabled","sensitivity","conversation","pause_min")}
                 ADAPTIVE.set(**keep)
                 return self._s(200,json.dumps(adaptive_state(full=True)))
             if self.path=="/api/crusher/setting":

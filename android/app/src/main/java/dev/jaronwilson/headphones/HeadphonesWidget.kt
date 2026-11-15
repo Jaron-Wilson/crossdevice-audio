@@ -223,8 +223,11 @@ class HeadphonesWidget : AppWidgetProvider() {
                             if (onPhone) CrusherDirect.setBass(context, next)
                             else http(context, "POST", "/api/crusher/bass", next.toString())
                         }
-                        else -> if (onPhone) CrusherDirect.setMode(context, arg)
-                                else http(context, "POST", "/api/crusher/mode", arg)
+                        else -> {
+                            CrusherAdaptiveCtl.manual(context, "picked on the widget")   // by hand: Adaptive pauses
+                            if (onPhone) CrusherDirect.setMode(context, arg)
+                            else http(context, "POST", "/api/crusher/mode", arg)
+                        }
                     }
                 }
             }
@@ -266,6 +269,7 @@ class HeadphonesWidget : AppWidgetProvider() {
             }
             // Crusher: mode + bass level.
             val crMode = when {
+                crOn && CrusherAdaptiveCtl.active(context) -> "adaptive"
                 cr?.optBoolean("anc") == true -> "anc"
                 cr?.optBoolean("transparency") == true -> "transparency"
                 crOn -> "off"
@@ -275,6 +279,12 @@ class HeadphonesWidget : AppWidgetProvider() {
                 v.setInt(id, "setBackgroundResource", if (crMode == key) R.drawable.btn_on else R.drawable.btn)
                 v.setOnClickPendingIntent(id, cmdIntent(context, "cr:$key", id))
             }
+            // Adaptive: opens the app, which turns it on (Android only lets a visible app start the microphone)
+            v.setInt(R.id.cr_ad, "setBackgroundResource", if (crMode == "adaptive") R.drawable.btn_on else R.drawable.btn)
+            v.setOnClickPendingIntent(R.id.cr_ad, PendingIntent.getActivity(context, R.id.cr_ad,
+                Intent(context, SetupActivity::class.java).setAction(CrusherAdaptiveCtl.ACTION_ON)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             val bass = cr?.opt("bass")
             v.setTextViewText(R.id.cr_bass, if (bass is Number) "Bass ${bass.toInt()}/10" else "Bass")
             v.setOnClickPendingIntent(R.id.cr_bdown, cmdIntent(context, "cr:bass-", R.id.cr_bdown))

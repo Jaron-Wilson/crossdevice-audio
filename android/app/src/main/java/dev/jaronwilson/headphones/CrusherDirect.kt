@@ -124,7 +124,10 @@ object CrusherDirect {
     // AT.UIAUDIO=transparency|atoncall|atonpause answer with on/off ONLY (there is no transparency
     // level, and anc_filter / samplingrate / AT.VOLUME? / AT.FEATURE=enable are ERROR), so no level
     // control exists and we never send commands we have not seen answered. Read once per connection.
-    private val EXTRA_Q = linkedMapOf("at_on_call" to "AT.UIAUDIO=atoncall", "at_on_pause" to "AT.UIAUDIO=atonpause")
+    // transparency_level is asked too (as the laptop does): a firmware that answers it with a number has a
+    // level, which Crusher Adaptive then uses; this one does not, so Adaptive maps "moderate" to Off.
+    private val EXTRA_Q = linkedMapOf("transparency_level" to "AT.UIAUDIO=transparency",
+        "at_on_call" to "AT.UIAUDIO=atoncall", "at_on_pause" to "AT.UIAUDIO=atonpause")
     @Volatile private var extras: JSONObject? = null
 
     private fun answered(r: String) = r.contains("OK") && !r.contains("ERROR")
@@ -136,6 +139,10 @@ object CrusherDirect {
         val out = JSONObject()
         for ((k, r) in EXTRA_Q.keys.zip(replies)) {
             if (!answered(r)) continue
+            if (k == "transparency_level") {
+                Regex(":\\s*(?:on|off)?\\s*,\\s*(\\d+)").find(r)?.let { out.put(k, it.groupValues[1].toInt()) }
+                continue
+            }
             Regex(":\\s*(on|off)").find(r)?.let { out.put(k, it.groupValues[1] == "on") }
         }
         // read-only feature flags: AT.FEATURE=count, then AT.FEATURE=info,0,<count> ("name,id,policy,x,enabled|disabled")
@@ -166,6 +173,23 @@ object CrusherDirect {
         val r = sessionEach(context, listOf(cmd), read = true).firstOrNull() ?: ""
         if (!answered(r)) error("Crusher refused $cmd")
         if (name != "bass_on") extras?.put(name, value)
+    }
+
+    /** Does this firmware answer the transparency level (read once per connection with the extras)? */
+    fun hasLevel(context: Context): Boolean = runCatching { readExtras(context).has("transparency_level") }.getOrDefault(false)
+
+    /** Send AT commands in one session; throws if the Crusher refuses one or does not answer. */
+    fun sendCommands(context: Context, cmds: List<String>) {
+        val rs = sessionEach(context, cmds, read = true)
+        val bad = cmds.filterIndexed { i, _ -> !answered(rs.getOrElse(i) { "" }) }
+        if (bad.isNotEmpty()) error("Crusher refused " + bad.joinToString(", "))
+    }
+
+    /** "anc" | "transparency" | "off" as the Crusher reports it now, or null if it is not reachable. */
+    fun modeNow(context: Context): String? {
+        val st = state(context) ?: return null
+        if (!st.optBoolean("online")) return null
+        return modeOf(st.optBoolean("anc"), st.optBoolean("transparency"))
     }
 
     /** Set the noise mode: "anc", "transparency", or "off". */

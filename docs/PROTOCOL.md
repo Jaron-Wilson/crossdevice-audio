@@ -36,6 +36,51 @@ There is **no EQ over AT.** The app's EQ, Personal Sound (Mimi), button remappin
 go over Bragi's protobuf RPC or Airoha's RACE transport, not AT. For tone, the Crusher has its sensory
 bass, and the source-side EQ (below) covers everything else.
 
+`AT.FEATURE=info,0,<n>` lists `name,id,policy,?,enabled|disabled`. The Crusher (firmware checked
+2026-11-15) answers `count` = 5: Fastmute Control (disabled), Tile Find Me, Spotify One Touch, Remote Control
+(enabled) and Latency Mode (disabled). No feature senses or adapts to noise.
+
+### Airoha RACE: what the Crusher's chip reports (and doesn't)
+
+The Crusher ANC 2 is Skull-iQ model `CHP200` ("CHP200", "S6CAW"): an **Airoha AB1568**. Skull-iQ's device
+config for it lists ANC, transparency, filters and bass over BOS_AT, and only transparency gain, ANC gain,
+EQ, multipoint, TWS and FOTA over Airoha RACE. Bragi's `FeatureType` has no adaptive ANC, environment
+detection or adaptive EQ at all; the Airoha SDK inside the app does, as generic calls Skull-iQ never makes.
+
+**Transport.** RACE runs on its own RFCOMM (SPP) service, the Airoha default UUID
+`00000000-0000-0000-0099-AABBCCDDEEFF` (CHP200's config has no RACE service of its own, so the SDK's default
+`D5.c` is used). On Windows, connect with that UUID in `SOCKADDR_BTH.serviceClassId` and port 0 (Winsock
+does the SDP lookup); on Android `createRfcommSocketToServiceRecord(uuid)`. The generic SPP UUID `1101`
+connects too, but answers RACE packets with `ERROR` (it is an AT port). The Skullcandy RACE / legacy RACE /
+RPC UUIDs are not registered on this firmware (10049).
+
+**Packet.** `05 <type> <len u16 LE> <id u16 LE> <payload>`, `len` = 2 + payload length. Type `5A` = command
+that wants a reply, `5B` = reply, `5D` = notification. Replies carry a status byte (0 = OK) after the id.
+
+Read-only queries sent to the real headset (from the SDK's "Get" stages), all on the RACE channel:
+
+| SDK stage | Sent | Reply from the Crusher |
+|---|---|---|
+| MmiStageGetAncStatus (`0x0901`, module 5) | `05 5A 04 00 01 09 05 00` | `05 5B 09 00 01 09 05 00 00 09 00 00 AA` |
+| MmiStageGetPassThruGain (`0x0901`, module 7) | `05 5A 04 00 01 09 07 00` | `05 5B 08 00 01 09 07 00 00 00 00 00` |
+| MmiStageGetAudioFeatureCapability (`0x0E30`) | `05 5A 08 00 30 0E 00 01 00 00 00 00` | none |
+| AncStageGetFullAdaptiveAncStatus (`0x0E26`) | `05 5A 06 00 26 0E 00 0D 00 00` | none |
+| AncStageGetEnvironmentDetectionStatus (`0x0E17`) | `05 5A 04 00 17 0E 03 02` | none |
+| AncStageGetEnvironmentDetectionInfo (`0x0E15`) | `05 5A 03 00 15 0E 03` | none |
+| AdvancedStageGetAdaptiveEqDetectionStatus (`0x0901`, module 23) | `05 5A 04 00 01 09 17 00` | none |
+| AdvancedStageGetAdaptiveEqIndex (`0x0901`, module 21) | `05 5A 04 00 01 09 15 00` | none |
+
+"None" means no bytes within 6 s, while a `0x0901` query sent right after each one was answered at once, so
+the link was alive: the firmware simply has no handler for them. For reference, the SDK parses an
+environment detection reply as level (byte 12: 0 disabled, 1 to 4), feed-forward and feedback gain
+(bytes 8-9 and 10-11, int16 LE / 100) and stationary noise per side (bytes 13-14, 15-16), and the capability
+reply as one byte each for ANC (2 = full adaptive), passthrough, monitor, hearing aid, wind, environment
+detection, adaptive EQ, ANC sync, sidetone, NR. Never send the `0x0E06` "AncStageAncOn" or any set stage
+while exploring: they change the ANC filter.
+
+So the Crusher can't sense the room for us without call mode. The only headset-side sensor is its call mic
+(HFP), which is what Crusher Adaptive listens through (its only mic), only while nothing plays.
+
 ## AirPods Pro 2: AAP over classic L2CAP channel `0x1001`
 
 | Purpose | Bytes |
@@ -128,9 +173,10 @@ audio arrives within 5 s it stops and says so, and it never falls back to anothe
 known that reports an ambient noise *level*: Adaptive Audio measures it inside the AirPods and acts on it.
 
 The Crusher reports nothing it senses over AT: `AT.UIAUDIO?` and its unsolicited `.UIAUDIO` lines give only the
-mode, `AT.CRUSHER?` the bass. That is why Crusher Adaptive (README) listens with the computer's own mic and only
-sends the mode commands above plus `AT.UIAUDIO=transparency,,<n>` (and `AT.VOLUME` on Windows for "lower media"). The Airoha SDK inside Skull-iQ has an "environment detection" call (stationary
-noise per side, ANC gains), but Skull-iQ never calls it, and it would go over Airoha's RACE transport, not AT.
+mode, `AT.CRUSHER?` the bass. That is why Crusher Adaptive (README) listens through the Crusher's own call mic
+(only while nothing plays) and only sends the mode commands above plus `AT.UIAUDIO=transparency,,<n>`.
+Over Airoha RACE it doesn't either: the environment detection, full adaptive ANC and adaptive EQ queries of
+the SDK go unanswered on this firmware (see "Airoha RACE" above).
 
 ### Ear detection: left and right (Android 1.9.0)
 
@@ -222,8 +268,8 @@ they are stored.
 | GET | `/api/caps` | | `{crusher:bool, airpods:bool, crusher_adaptive:bool, eq:bool}`. Fast; the rings poll it |
 | POST | `/api/airpods/mode` | `off\|anc\|transparency\|adaptive` | 503 if the AirPods aren't connected |
 | POST | `/api/crusher/mode` | `anc\|transparency\|off\|adaptive` | `adaptive` turns Crusher Adaptive on (and ends a pause). The other three are a manual change: they pause Adaptive. So does setting `transparency_level` |
-| GET | `/api/crusher/adaptive` | | `{available, enabled, paused, paused_for_s, listening, mic, status, error, ambient_db, raw_db, zone:quiet\|moderate\|loud, steady, speech, held, conversation, target:{mode,level,label}, thresholds:{quiet_max,loud_min}, settings, mics}`. Also in `/api/state` as `crusher.adaptive` (without `mics`) |
-| POST | `/api/crusher/adaptive` | `{"enabled":true,"sensitivity":60,"conversation":true,"duck":false,"mic":"","pause_min":10}` | Any subset. `mic` must be one of `mics` (`""` = automatic); `pause_min` 0 = until Adaptive is picked again |
+| GET | `/api/crusher/adaptive` | | `{available, enabled, paused, paused_for_s, listening, mic, phase:off\|paused\|no_crusher\|music\|quiet_wait\|mic_error\|listening, music_hold, media_playing, mic_error, status, error, ambient_db, raw_db, zone:quiet\|moderate\|loud, steady, speech, conversation, target:{mode,level,label}, thresholds:{quiet_max,loud_min}, settings}`. `mic` is the Crusher's mic while it listens (the only mic it uses); `music_hold` true = paused while music plays (or in the 10 s after), holding `target`. Also in `/api/state` as `crusher.adaptive` |
+| POST | `/api/crusher/adaptive` | `{"enabled":true,"sensitivity":60,"conversation":true,"pause_min":10}` | Any subset. `pause_min` 0 = until Adaptive is picked again |
 | POST | `/api/crusher/bass` | `0-10` | |
 | POST | `/api/handoff` | `phone\|laptop` | Who has the AirPods. The laptop steps aside for the phone |
 | GET | `/api/track` | | Last seen on the laptop: `{airpods:{connected, last_connected, events:[{t, event:connected\|disconnected, where:"laptop"}]}, crusher:{…}}`. Times are Unix seconds. Polled from BlueZ every 30 s, last 50 per device, stored in `~/.local/state/headphone-panel/track.json` |
@@ -252,7 +298,7 @@ What the panel does instead (`laptop/hp_sound.py`):
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| GET | `/state` | | The same fields as the panel's `/api/crusher/adaptive`, with `mics:[{name, safe}]` |
-| POST | `/enable` / `/disable` | | Turn it on (ends a pause) or off (closes the mic, puts the volume back) |
+| GET | `/state` | | The same fields as the panel's `/api/crusher/adaptive`, with `crusher_mic` (the Crusher's Hands-Free input name, or null) |
+| POST | `/enable` / `/disable` | | Turn it on (ends a pause) or off (closes the mic) |
 | POST | `/manual` | | A mode was changed by hand: pause. `crusher_win.py anc\|transparency\|transparency-level` sends it |
-| POST | `/set` | `{"sensitivity":60,"conversation":true,"duck":false,"mic":"Webcam","pause_min":10}` | `mic` is part of a device name; a headset or Bluetooth mic is refused |
+| POST | `/set` | `{"sensitivity":60,"conversation":true,"pause_min":10}` | Any subset. There is no mic choice: only the Crusher's own mic is ever opened |

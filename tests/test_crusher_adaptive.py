@@ -210,8 +210,8 @@ class SpeechTest(unittest.TestCase):
 # ---------------------------------------------------------------------------------------------------
 # deciding
 
-def rd(level, speech=False, steady=False, held=False):
-    return ca.Reading(0.0, level, level, steady, speech, held=held)
+def rd(level, speech=False, steady=False):
+    return ca.Reading(0.0, level, level, steady, speech)
 
 
 class Sim:
@@ -324,10 +324,11 @@ class PolicyZoneTest(unittest.TestCase):
         s = Sim(lo).hold(rd(-45), 6)
         self.assertEqual(s.modes(), [("transparency", 50)])
 
-    def test_held_readings_are_ignored(self):
-        s = Sim(ca.Policy()).hold(rd(QUIET), 6)
-        s.hold(rd(LOUD, held=True), 60)               # the laptop's speakers are playing
-        self.assertEqual(s.modes(), [("transparency", 50)])
+    def test_end_conversation_without_one_sends_nothing(self):
+        p = ca.Policy()
+        Sim(p).hold(rd(LOUD), 6)
+        self.assertIsNone(p.end_conversation())
+        self.assertEqual(p.applied.mode, "anc")
 
 
 class PolicyConversationTest(unittest.TestCase):
@@ -374,12 +375,14 @@ class PolicyConversationTest(unittest.TestCase):
         s.hold(rd(QUIET, speech=True), 20)
         self.assertEqual(len(s.sent), 1)
 
-    def test_duck_flag(self):
-        s = Sim(ca.Policy(ca.Settings({"duck": True}))).hold(rd(QUIET), 6)
-        s.hold(rd(QUIET, speech=True), 2)
-        self.assertTrue(s.sent[-1][1].duck)
-        s.hold(rd(QUIET), 6)
-        self.assertFalse(s.sent[-1][1].duck)
+    def test_end_conversation_returns_the_rooms_mode(self):
+        p = ca.Policy()
+        s = Sim(p).hold(rd(LOUD), 6)
+        s.hold(rd(LOUD, speech=True), 2)
+        self.assertTrue(p.conv)
+        t = p.end_conversation()                      # the mic closes for music: the end can't be heard
+        self.assertEqual((t.mode, t.conv), ("anc", False))
+        self.assertFalse(p.conv)
 
     def test_turning_awareness_off_mid_conversation_returns(self):
         p = ca.Policy()
@@ -434,14 +437,13 @@ class PolicyManualTest(unittest.TestCase):
 
 class SettingsTest(unittest.TestCase):
     def test_clamping_and_types(self):
-        st = ca.Settings({"sensitivity": 500, "pause_min": -3, "conversation": "off", "duck": "on",
-                          "mic": 7, "unknown": 1})
+        st = ca.Settings({"sensitivity": 500, "pause_min": -3, "conversation": "off", "unknown": 1,
+                          "mic": "Microphone Array", "headset_mic": False, "duck": True})
         self.assertEqual(st.sensitivity, 100)
         self.assertEqual(st.pause_min, 0)
         self.assertFalse(st.conversation)
-        self.assertTrue(st.duck)
-        self.assertEqual(st.mic, "7")
-        self.assertNotIn("unknown", st.as_dict())
+        for gone in ("unknown", "mic", "headset_mic", "duck"):      # old saved settings are ignored
+            self.assertNotIn(gone, st.as_dict())
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -518,12 +520,12 @@ class FakeMeter:
         pass
 
 
-class FakeCap:
+class FakeHeadsetCap:
     opened = 0
 
-    def __init__(self, mic):
-        FakeCap.opened += 1
-        self.label, self.closed = mic or "test mic", False
+    def __init__(self):
+        FakeHeadsetCap.opened += 1
+        self.label, self.closed = "Crusher mic (call profile)", False
 
     def read(self, n):
         return [0.0] * n
@@ -532,20 +534,36 @@ class FakeCap:
         self.closed = True
 
 
+IDLE_STEPS = int(ca.AdaptiveRunner.HEADSET_IDLE_S / 0.5) + 2      # quiet before the Crusher's mic opens
+
+
 class RunnerTest(unittest.TestCase):
-    def make(self, readings=(), connected=True, fail=False, **settings):
+    """The runner: the Crusher's own mic only, and only while nothing plays (it needs the call profile)."""
+
+    def make(self, readings=(), connected=True, fail=False, playing=False, headset_fails=False, **settings):
         self.clock = FakeClock()
-        self.sent, self.ducks, self.saved = [], [], []
+        self.sent, self.saved = [], []
         self.mode = None
+        self.playing = playing
+        FakeHeadsetCap.opened = 0
 
         def send(cmds):
             if fail:
                 raise OSError("not reachable")
             self.sent.append((self.clock.t, list(cmds)))
 
-        FakeCap.opened = 0
-        r = ca.AdaptiveRunner(open_capture=FakeCap, send=send, read_mode=lambda: self.mode,
-                              connected=lambda: connected, duck=self.ducks.append, load=lambda: settings,
+        def open_headset():
+            if headset_fails:
+                raise RuntimeError("no SCO link")
+            return FakeHeadsetCap()
+
+        def media():
+            if isinstance(self.playing, Exception):
+                raise self.playing
+            return self.playing
+
+        r = ca.AdaptiveRunner(open_headset=open_headset, send=send, media_playing=media,
+                              read_mode=lambda: self.mode, connected=lambda: connected, load=lambda: settings,
                               save=self.saved.append, clock=self.clock, log=lambda m: None)
         r.meter = FakeMeter(readings)
         return r
@@ -555,25 +573,93 @@ class RunnerTest(unittest.TestCase):
             self.clock.t += dt
             r.step()
 
+    def test_there_is_no_host_mic(self):
+        import inspect
+        params = inspect.signature(ca.AdaptiveRunner).parameters
+        self.assertNotIn("open_capture", params)
+        self.assertNotIn("gate", params)
+        self.assertEqual(list(params)[0], "open_headset")
+
     def test_disabled_never_opens_the_mic(self):
         r = self.make([rd(QUIET)] * 20)
-        self.steps(r, 20)
-        self.assertEqual(FakeCap.opened, 0)
+        self.steps(r, 60)
+        self.assertEqual(FakeHeadsetCap.opened, 0)
         self.assertEqual(self.sent, [])
         self.assertEqual(r.state()["status"], "off")
 
     def test_no_crusher_no_mic(self):
         r = self.make([rd(QUIET)] * 20, connected=False, enabled=True)
-        self.steps(r, 20)
-        self.assertEqual(FakeCap.opened, 0)
-        self.assertIn("waiting", r.state()["status"])
+        self.steps(r, 60)
+        self.assertEqual(FakeHeadsetCap.opened, 0)
+        self.assertIn("waiting for the Crusher", r.state()["status"])
 
-    def test_enabled_adapts_and_sends_at(self):
+    def test_waits_for_quiet_then_adapts_and_sends_at(self):
         r = self.make([rd(QUIET)] * 12, enabled=True)
-        self.steps(r, 12)
-        self.assertEqual(FakeCap.opened, 1)
+        self.steps(r, 10)                                   # 5 s of nothing playing: not yet
+        self.assertEqual(FakeHeadsetCap.opened, 0)
+        self.assertTrue(r.state()["music_hold"])
+        self.assertIn("listening again in", r.state()["status"])
+        self.steps(r, IDLE_STEPS - 10 + 12)
+        self.assertEqual(FakeHeadsetCap.opened, 1)
+        self.assertEqual(r.state()["mic"], "Crusher mic (call profile)")
         self.assertEqual(self.sent[0][1], ["AT.UIAUDIO=transparency,on", "AT.UIAUDIO=transparency,,50"])
         self.assertEqual(r.state()["target"]["mode"], "transparency")
+
+    def test_while_media_plays_no_mic_at_all(self):
+        r = self.make([rd(QUIET)] * 50, enabled=True, playing=True)
+        self.steps(r, 120)
+        self.assertEqual(FakeHeadsetCap.opened, 0)
+        st = r.state()
+        self.assertFalse(st["listening"])
+        self.assertTrue(st["media_playing"])
+        self.assertTrue(st["music_hold"])
+        self.assertIn("paused while music plays", st["status"])
+
+    def test_a_failing_media_check_counts_as_playing(self):
+        r = self.make([rd(QUIET)] * 50, enabled=True, playing=RuntimeError("no session API"))
+        self.steps(r, 120)
+        self.assertEqual(FakeHeadsetCap.opened, 0)
+        self.assertIn("paused while music plays", r.state()["status"])
+
+    def test_media_starting_closes_the_mic_and_holds_the_mode(self):
+        r = self.make([rd(LOUD)] * 400, enabled=True)
+        self.steps(r, IDLE_STEPS + 14)
+        hs = r.cap
+        self.assertIsNotNone(hs)
+        self.assertEqual(r.policy.applied.mode, "anc")
+        n = len(self.sent)
+        self.playing = True
+        self.steps(r, 3)                                    # 1.5 s
+        self.assertTrue(hs.closed)
+        self.assertIsNone(r.cap)
+        self.steps(r, 120)
+        self.assertEqual(FakeHeadsetCap.opened, 1)          # and stays closed while it plays
+        self.assertEqual(len(self.sent), n)                 # the mode is held: nothing sent
+        self.assertEqual(r.policy.applied.mode, "anc")
+        self.assertIn("holding ANC", r.state()["status"])
+        self.playing = False                                # music stops: listening again after the quiet time
+        self.steps(r, IDLE_STEPS)
+        self.assertEqual(FakeHeadsetCap.opened, 2)
+
+    def test_media_during_a_conversation_returns_to_the_rooms_mode(self):
+        seq = [rd(LOUD)] * 14 + [rd(LOUD, speech=True)] * 6 + [rd(LOUD)] * 100
+        r = self.make(seq, enabled=True)
+        self.steps(r, IDLE_STEPS + 20)
+        self.assertTrue(r.policy.conv)
+        self.playing = True
+        self.steps(r, 12)
+        self.assertFalse(r.policy.conv)
+        self.assertEqual(r.policy.applied, ca.T("anc"))
+        self.assertEqual(self.sent[-1][1], ["AT.UIAUDIO=transparency,off", "AT.UIAUDIO=anc,on"])
+
+    def test_mic_failure_retries_later_with_no_fallback(self):
+        r = self.make([rd(QUIET)] * 50, enabled=True, headset_fails=True)
+        self.steps(r, IDLE_STEPS + 4)
+        st = r.state()
+        self.assertFalse(st["listening"])
+        self.assertIn("SCO", st["mic_error"])
+        self.assertIn("not available", st["status"])
+        self.assertEqual(self.sent, [])
 
     def test_runner_rate_limits(self):
         r = self.make(enabled=True)
@@ -594,23 +680,26 @@ class RunnerTest(unittest.TestCase):
 
     def test_manual_pauses_and_closes_the_mic(self):
         r = self.make([rd(QUIET)] * 40, enabled=True, pause_min=10)
-        self.steps(r, 12)
+        self.steps(r, IDLE_STEPS + 12)
         cap = r.cap
         r.manual("test")
         self.assertTrue(cap.closed)
         self.steps(r, 20)
         self.assertIsNone(r.cap)
         self.assertTrue(r.state()["paused"])
-        self.assertIn("paused", r.state()["status"])
+        self.assertIn("paused after a manual change", r.state()["status"])
         r.set(enabled=True)                          # picking Adaptive again resumes at once
         self.assertFalse(r.state()["paused"])
 
-    def test_a_change_on_the_headset_is_noticed(self):
+    def test_a_change_on_the_headset_is_noticed_while_music_plays(self):
         r = self.make([rd(QUIET)] * 200, enabled=True)
-        self.steps(r, 12)
+        self.steps(r, IDLE_STEPS + 12)
         self.assertEqual(r.policy.applied.mode, "transparency")
         self.mode = "anc"                            # someone pressed the Crusher's button
-        self.steps(r, 70)                            # the mode is read back every 30 s
+        self.steps(r, 70)                            # no read-back on the call profile
+        self.assertFalse(r.state()["paused"])
+        self.playing = True                          # back on A2DP: the mode is read every 30 s
+        self.steps(r, 90)
         self.assertTrue(r.state()["paused"])
 
     def test_our_own_change_is_not_taken_as_manual(self):
@@ -621,19 +710,25 @@ class RunnerTest(unittest.TestCase):
         self.assertFalse(r.observe("off", now + 2))  # within the grace time after our own send
         self.assertTrue(r.observe("off", now + 20))
 
-    def test_duck_on_conversation_and_back(self):
-        seq = [rd(QUIET)] * 12 + [rd(QUIET, speech=True)] * 4 + [rd(QUIET)] * 16
-        r = self.make(seq, enabled=True, duck=True)
-        self.steps(r, len(seq))
-        self.assertEqual(self.ducks, [True, False])
+    def test_no_manual_detection_on_the_call_profile(self):
+        r = self.make([rd(QUIET)] * 200, enabled=True)
+        self.steps(r, IDLE_STEPS + 12)
+        self.assertTrue(r.state()["listening"])
+        now = self.clock.t
+        r.limiter.next_ok = -math.inf
+        self.assertTrue(r.apply(ca.T("anc"), now))
+        self.assertFalse(r.observe("transparency", now + 20))
+        self.playing = True
+        self.steps(r, 3)
+        self.assertFalse(r.observe("transparency", self.clock.t + 1))   # grace after leaving the call profile
+        self.assertTrue(r.observe("transparency", self.clock.t + 20))
 
-    def test_turning_off_restores_the_volume(self):
-        seq = [rd(QUIET)] * 12 + [rd(QUIET, speech=True)] * 4
-        r = self.make(seq, enabled=True, duck=True)
-        self.steps(r, len(seq))
-        self.assertEqual(self.ducks, [True])
+    def test_turning_off_closes_the_mic(self):
+        r = self.make([rd(QUIET)] * 40, enabled=True)
+        self.steps(r, IDLE_STEPS + 4)
+        cap = r.cap
         r.set(enabled=False)
-        self.assertEqual(self.ducks, [True, False])
+        self.assertTrue(cap.closed)
         self.assertIsNone(r.cap)
 
     def test_settings_are_clamped_and_saved(self):
@@ -644,7 +739,7 @@ class RunnerTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------------------------
-# which microphones may be opened (the Windows daemon's rule; the laptop uses hp_sound.sources())
+# the Windows daemon opens the Crusher's mic and nothing else
 
 class WindowsMicChoiceTest(unittest.TestCase):
     def setUp(self):
@@ -657,31 +752,94 @@ class WindowsMicChoiceTest(unittest.TestCase):
         self.caw.list_mics = self.real
 
     def fake(self, names):
-        self.caw.list_mics = lambda: [(i, n, self.caw.mic_is_safe(n)) for i, n in enumerate(names)]
+        self.caw.list_mics = lambda: list(enumerate(names))
 
-    def test_headset_mics_are_never_safe(self):
-        for n in ("Headset (Crusher ANC 2 Hands-F", "Headset Microphone (2- AirPods", "Hands-Free AG Audio",
-                  "Microphone (Bluetooth Audio)", "Skullcandy Crusher ANC 2"):
-            with self.subTest(n=n):
-                self.assertFalse(self.caw.mic_is_safe(n))
-        for n in ("Microphone Array (Realtek(R) Au", "Microphone (C920 HD Pro Webcam)", "Mic in at front panel"):
-            with self.subTest(n=n):
-                self.assertTrue(self.caw.mic_is_safe(n))
+    def test_only_the_crusher_mic_is_picked(self):
+        self.fake(["Microphone (C920 HD Pro Webcam)", "Microphone Array (Realtek(R) Au",
+                   "Headset (Crusher ANC 2 Hands-F"])
+        self.assertEqual(self.caw.crusher_mic(), (2, "Headset (Crusher ANC 2 Hands-F"))
 
-    def test_auto_skips_the_headset_even_when_it_is_first(self):
-        self.fake(["Headset (Crusher ANC 2 Hands-F", "Microphone (C920 HD Pro Webcam)"])
-        self.assertEqual(self.caw.pick_mic("")[1], "Microphone (C920 HD Pro Webcam)")
-
-    def test_asking_for_the_headset_is_refused(self):
-        self.fake(["Headset (Crusher ANC 2 Hands-F", "Microphone (C920 HD Pro Webcam)"])
+    def test_no_crusher_mic_means_no_mic(self):
+        self.fake(["Microphone (C920 HD Pro Webcam)", "CABLE Output (VB-Audio Virtual",
+                   "Headset Microphone (2- AirPods"])
+        self.assertIsNone(self.caw.crusher_mic())
         with self.assertRaises(RuntimeError):
-            self.caw.pick_mic("Crusher")
-        self.assertEqual(self.caw.pick_mic("c920")[1], "Microphone (C920 HD Pro Webcam)")
+            self.caw.WaveInCapture()                # never falls back to another input
 
-    def test_no_safe_mic(self):
-        self.fake(["Headset (Crusher ANC 2 Hands-F"])
+    def test_no_host_mic_picker(self):
+        self.assertFalse(hasattr(self.caw, "pick_mic"))
+        self.assertNotIn("mic", self.caw.SETTABLE)
+
+
+# ---------------------------------------------------------------------------------------------------
+# the laptop's headset mic: profile switch and restore, and the media check (pactl faked)
+
+class LaptopHeadsetTest(unittest.TestCase):
+    MAC = "E8:8F:16:52:64:0E"
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(ROOT, "laptop"))
+        import hp_adaptive
+        self.hp = hp_adaptive
+        self.real_run, self.real_popen = hp_adaptive._run, hp_adaptive.subprocess.Popen
+        self.calls, self.profile, self.sinks = [], "a2dp-sink", ""
+
+        class R:
+            def __init__(self, out):
+                self.stdout = out
+
+        def run(cmd, timeout=4):
+            self.calls.append(cmd)
+            if cmd[:4] == ["pactl", "-f", "json", "list"]:
+                import json as _j
+                return R(_j.dumps([{"name": "bluez_card.E8_8F_16_52_64_0E", "active_profile": self.profile,
+                                    "profiles": {"a2dp-sink": {}, "headset-head-unit": {"available": True},
+                                                 "headset-head-unit-cvsd": {}, "off": {}}}]))
+            if cmd[:3] == ["pactl", "set-card-profile", "bluez_card.E8_8F_16_52_64_0E"]:
+                self.profile = cmd[3]
+                return R("")
+            if cmd == ["pactl", "list", "short", "sources"]:
+                hfp = self.profile.startswith("headset")
+                return R("1\talsa_input.pci.mic\tPipeWire\ts16le\tSUSPENDED\n" +
+                         ("7\tbluez_input.E8_8F_16_52_64_0E.0\tPipeWire\ts16le\tSUSPENDED\n" if hfp else ""))
+            if cmd == ["pactl", "list", "short", "sinks"]:
+                return R(self.sinks)
+            return R("")
+
+        class P:
+            def __init__(p, args, **kw):
+                p.args, p.pid, p.stdout = args, 1, None
+
+            def poll(p):
+                return 0
+
+        hp_adaptive._run = run
+        hp_adaptive.subprocess.Popen = P
+
+    def tearDown(self):
+        self.hp._run, self.hp.subprocess.Popen = self.real_run, self.real_popen
+
+    def test_switches_to_hfp_reads_its_source_and_restores_a2dp(self):
+        cap = self.hp.HeadsetCapture(self.MAC, wait_s=0.5)
+        self.assertEqual(self.profile, "headset-head-unit")
+        self.assertIn("bluez_input.E8_8F_16_52_64_0E.0", cap.proc.args)
+        cap.close()
+        self.assertEqual(self.profile, "a2dp-sink")
+
+    def test_no_card_is_an_error_without_switching(self):
         with self.assertRaises(RuntimeError):
-            self.caw.pick_mic("")
+            self.hp.HeadsetCapture("00:11:22:33:44:55", wait_s=0.2)
+        self.assertFalse(any(c[:2] == ["pactl", "set-card-profile"] for c in self.calls))
+
+    def test_the_laptop_mics_are_never_used(self):
+        self.assertFalse(hasattr(self.hp, "mics"))
+        self.assertFalse(hasattr(self.hp, "safe_mic"))
+
+    def test_media_playing_is_any_running_sink(self):
+        self.sinks = "1\talsa_output.x\tPipeWire\ts32le\tSUSPENDED\n2\thp_eq.input\tPipeWire\tf32\tIDLE\n"
+        self.assertFalse(self.hp.media_playing())
+        self.sinks += "3\tbluez_output.E8_8F_16_52_64_0E.1\tPipeWire\ts16le\tRUNNING\n"
+        self.assertTrue(self.hp.media_playing())
 
 
 if __name__ == "__main__":

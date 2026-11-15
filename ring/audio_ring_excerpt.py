@@ -5,7 +5,7 @@ Only the Audio part is shown:
   * audio_children(): the fan only offers controls a connected device can actually do;
   * eq_cycle(): the "EQ" wedge steps through the shared EQ presets (laptop: panel API, PC: Equalizer APO);
   * adaptive_pick(): the "Adaptive" wedge, for the AirPods (their own Adaptive) and the Crusher (Crusher
-    Adaptive: the laptop's or PC's mic decides its mode, see shared/crusher_adaptive.py);
+    Adaptive: the Crusher's own mic decides its mode while nothing plays, see shared/crusher_adaptive.py);
   * win_bt_connected(): driver-free "is this headset connected?" on Windows (BluetoothApis, ~1 ms);
   * a background poller, so opening the ring never waits on Bluetooth.
 """

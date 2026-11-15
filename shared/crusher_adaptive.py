@@ -1,26 +1,33 @@
 """Crusher Adaptive: an "Adaptive" noise mode for the Skullcandy Crusher ANC 2, done outside the headphones.
 
-The Crusher has no adaptive ANC and reports nothing it senses (docs/PROTOCOL.md), so this listens to the
-room with the HOST's own microphone (the laptop's or the PC's, never the headset's: opening a Bluetooth
-headset mic switches it to call mode) and moves the Crusher between its modes over the AT channel:
+The Crusher has no adaptive ANC and reports nothing it senses: its Airoha firmware answers none of the
+Airoha SDK's environment detection, full adaptive ANC or adaptive EQ queries (checked on the headset, see
+docs/PROTOCOL.md). So this listens to the room through the CRUSHER'S OWN MIC (never the laptop's, the PC's
+or the phone's) and moves the Crusher between its modes over the AT channel:
 
     quiet room              -> Transparency at a moderate level
     moderate, varying noise -> Transparency at a lower level (Off if the firmware has no level)
     loud, or steady noise   -> ANC
-    someone talking nearby  -> Transparency high (optionally lower the media), back ~5 s after the speech stops
+    someone talking nearby  -> Transparency high, back ~5 s after the speech stops
+
+A Bluetooth headset mic needs the call profile (HFP), which would turn music into mono call audio. So the
+headset mic is opened only after nothing has played for HEADSET_IDLE_S, and closed within about a second
+when anything plays. While media plays Adaptive senses nothing and holds the last mode it decided ("paused
+while music plays"); a failed "is anything playing?" check counts as playing.
 
 Only numbers are kept: a loudness in dB and a few speech features per window. No audio is recorded, stored
 or sent anywhere; each block of samples is dropped as soon as it has been measured.
 
 This module is platform-free (numpy for the measuring part only), shared by the laptop panel
-(laptop/hp_adaptive.py) and the Windows daemon (windows/crusher_adaptive_win.py). The pieces:
+(laptop/hp_adaptive.py) and the Windows daemon (windows/crusher_adaptive_win.py); the phone has a Kotlin
+port (android/.../CrusherAdaptive.kt). The pieces:
 
     AmbientMeter   samples -> Reading (A-weighted dBFS, smoothed level, steady?, speech nearby?)
     Policy         Reading + time -> the Target to send now, with hysteresis, hold, dwell, conversation
                    and manual-override pause. Pure Python, unit-tested with synthetic sequences.
     RateLimiter    at most one command batch per few seconds
     commands_for   Target -> Crusher AT commands (only what changed)
-    AdaptiveRunner the loop: mic -> meter -> policy -> AT, with the platform's glue passed in
+    AdaptiveRunner the loop: headset mic (only while nothing plays) -> meter -> policy -> AT
 """
 import collections
 import math
@@ -55,16 +62,15 @@ def a_weight_db(f):
 
 class Reading:
     """One measurement. level is the smoothed A-weighted dBFS (RMS; a full-scale sine reads -3 dB)."""
-    __slots__ = ("t", "db", "level", "steady", "speech", "band_ratio", "mod_ratio", "depth", "held")
+    __slots__ = ("t", "db", "level", "steady", "speech", "band_ratio", "mod_ratio", "depth")
 
-    def __init__(self, t, db, level, steady=False, speech=False, band_ratio=0.0, mod_ratio=0.0, depth=0.0,
-                 held=False):
+    def __init__(self, t, db, level, steady=False, speech=False, band_ratio=0.0, mod_ratio=0.0, depth=0.0):
         self.t, self.db, self.level, self.steady, self.speech = t, db, level, steady, speech
-        self.band_ratio, self.mod_ratio, self.depth, self.held = band_ratio, mod_ratio, depth, held
+        self.band_ratio, self.mod_ratio, self.depth = band_ratio, mod_ratio, depth
 
     def __repr__(self):
         return (f"Reading(t={self.t:.1f}, db={self.db:.1f}, level={self.level:.1f}, steady={self.steady}, "
-                f"speech={self.speech}, held={self.held})")
+                f"speech={self.speech})")
 
 
 class AmbientMeter:
@@ -218,9 +224,9 @@ class AmbientMeter:
 # ---------------------------------------------------------------------------------------------------
 # Deciding
 
-class Target(collections.namedtuple("Target", "mode level conv duck")):
+class Target(collections.namedtuple("Target", "mode level conv")):
     """What the Crusher should be doing. mode: anc | transparency | off; level: transparency 0-100 or None;
-    conv: chosen for a conversation; duck: lower the media volume while it lasts."""
+    conv: chosen for a conversation."""
 
     def label(self):
         name = {"anc": "ANC", "transparency": "Transparency", "off": "Off"}[self.mode]
@@ -229,12 +235,11 @@ class Target(collections.namedtuple("Target", "mode level conv duck")):
         return name + (" (conversation)" if self.conv else "")
 
     def as_dict(self):
-        return {"mode": self.mode, "level": self.level, "conversation": self.conv, "duck": self.duck,
-                "label": self.label()}
+        return {"mode": self.mode, "level": self.level, "conversation": self.conv, "label": self.label()}
 
 
-def T(mode, level=None, conv=False, duck=False):
-    return Target(mode, level, conv, duck)
+def T(mode, level=None, conv=False):
+    return Target(mode, level, conv)
 
 
 class Settings:
@@ -243,8 +248,6 @@ class Settings:
         "enabled": False,
         "sensitivity": 50,          # 0-100: higher reacts to quieter noise
         "conversation": True,       # conversation awareness
-        "duck": False,              # lower the media volume while someone talks
-        "mic": "",                  # "" = automatic (the first safe built-in mic)
         "pause_min": 10,            # after a manual change: pause this long; 0 = until turned back on
         "quiet_level": 50,          # transparency level in a quiet room
         "moderate_level": 20,       # transparency level in moderate, varying noise
@@ -307,8 +310,9 @@ class Policy:
     - Conversation: CONV_ENTER speech readings in a row switch to transparency high at once; conv_return_s
       without speech switches back at once (the dwell does not delay the return).
     - Readings taken while the room's own level is being spoken over don't move the zone (voices are not
-      noise to block), and readings marked held (the host's speakers playing) are ignored entirely.
+      noise to block).
     - manual(now) pauses everything for pause_min minutes (0 = until resume()).
+    - end_conversation() when the mic closes for media: the end of the talking can no longer be heard.
     """
 
     def __init__(self, settings=None, has_level=True):
@@ -359,7 +363,7 @@ class Policy:
         return T("transparency", self.s.moderate_level) if lvl else T("off")
 
     def conv_target(self):
-        return T("transparency", self.s.conv_level if self.has_level else None, conv=True, duck=self.s.duck)
+        return T("transparency", self.s.conv_level if self.has_level else None, conv=True)
 
     def desired(self):
         if self.zone is None:
@@ -393,22 +397,21 @@ class Policy:
     def tick(self, r, now):
         if self.paused(now):
             return None
-        if not r.held:
-            if self.s.conversation:
-                if r.speech:
-                    self.speech_run += 1
-                    if self.conv or self.speech_run >= CONV_ENTER:
-                        self.last_speech = now
-                else:
-                    self.speech_run = 0
-                if not self.conv and self.speech_run >= CONV_ENTER:
-                    self.conv = True
+        if self.s.conversation:
+            if r.speech:
+                self.speech_run += 1
+                if self.conv or self.speech_run >= CONV_ENTER:
+                    self.last_speech = now
             else:
-                self.conv = False
                 self.speech_run = 0
-            if not (r.speech and self.zone is not None):
-                self.zone = self.classify(r.level)
-                self.steady = r.steady and self.zone != "quiet"
+            if not self.conv and self.speech_run >= CONV_ENTER:
+                self.conv = True
+        else:
+            self.conv = False
+            self.speech_run = 0
+        if not (r.speech and self.zone is not None):
+            self.zone = self.classify(r.level)
+            self.steady = r.steady and self.zone != "quiet"
         if self.conv and now - self.last_speech >= self.s.conv_return_s:
             self.conv = False
         want = self.desired()
@@ -426,6 +429,16 @@ class Policy:
         if now - self.pending[1] >= self.s.hold_s and now - self.last_switch >= self.s.dwell_s:
             return want
         return None
+
+    def end_conversation(self):
+        """The mic is closing (media started): a conversation's end can't be heard any more, so it ends now.
+        Returns the room's target to send instead, or None if there was no conversation (or no room yet)."""
+        if not self.conv:
+            return None
+        self.conv = False
+        self.speech_run = 0
+        self.pending = None
+        return self.zone_target() if self.zone is not None else None
 
     def committed(self, target, now):
         self.applied = target
@@ -480,33 +493,37 @@ def mode_of(state):
 # The loop
 
 class AdaptiveRunner:
-    """Glues a microphone, the meter, the policy and the Crusher together. Platform pieces are passed in:
+    """Glues the Crusher's mic, the meter, the policy and the Crusher together. Platform pieces are passed in:
 
-      open_capture(mic) -> object with read(n) -> float32 array (None at the end) and close()
+      open_headset()    -> the Crusher's own mic (call profile): an object with read(n) -> float32 array (None
+                           at the end), close() and optionally a label. Raises if it can't be opened.
+      media_playing()   -> True while anything plays on this device. An error counts as playing.
       send(cmds)        -> raises on failure (Crusher refused or not reachable)
       read_mode()       -> 'anc' | 'transparency' | 'off' | None (to notice a change made elsewhere)
       connected()       -> is the Crusher connected to this machine (the mic stays closed if not)
       has_level()       -> does this firmware answer the transparency level
-      gate()            -> True while the host's own speakers play (readings are ignored then)
-      duck(on)          -> lower / restore the media volume
       load() / save(d)  -> settings persistence
 
-    The mic is open only while Adaptive is on, not paused and the Crusher is connected.
+    There is no other microphone: the host's (laptop, PC, phone) is never opened. The Crusher's mic is open
+    only while Adaptive is on, not paused, the Crusher is connected here and nothing has played for
+    HEADSET_IDLE_S; it is closed within about a second of anything playing. In between Adaptive holds the
+    last mode it decided (a conversation is ended, since its end can't be heard any more).
     """
     BLOCK_S = 0.25
     MODE_CHECK_S = 30.0
     CONNECT_CHECK_S = 5.0
-    GATE_CHECK_S = 3.0
     MANUAL_GRACE_S = 8.0      # a mode read this soon after our own send isn't taken as a manual change
+    MEDIA_CHECK_S = 1.0       # how often "is anything playing?" is asked
+    HEADSET_IDLE_S = 10.0     # nothing played for this long before the Crusher's mic is opened
+    HEADSET_RETRY_S = 60.0    # after the Crusher's mic failed to open, wait this long before trying again
 
-    def __init__(self, open_capture, send, read_mode=None, connected=None, has_level=None, gate=None,
-                 duck=None, load=None, save=None, clock=time.monotonic, log=print, rate=RATE):
-        self.open_capture, self.send = open_capture, send
+    def __init__(self, open_headset, send, media_playing=None, read_mode=None, connected=None, has_level=None,
+                 load=None, save=None, clock=time.monotonic, log=print, rate=RATE):
+        self.open_headset, self.send = open_headset, send
+        self.media_playing = media_playing
         self.read_mode = read_mode or (lambda: None)
         self.connected = connected or (lambda: True)
         self.has_level = has_level or (lambda: True)
-        self.gate = gate or (lambda: False)
-        self.duck = duck
         self._save = save or (lambda d: None)
         self.clock, self.log, self.rate = clock, log, rate
         self.settings = Settings((load or (lambda: {}))() or {})
@@ -518,18 +535,23 @@ class AdaptiveRunner:
         self.wake = threading.Event()
         self.last = None              # last Reading
         self.status = "off"
+        self.phase = "off"            # off | paused | no_crusher | music | quiet_wait | mic_error | listening
         self.error = ""
-        self.ducked = False
         self.last_send = -math.inf
         self.last_mode_check = -math.inf
         self.last_conn = (-math.inf, False)
-        self.last_gate = (-math.inf, False)
         self.mic_open = ""
+        self.last_media = (-math.inf, True)
+        self.idle_since = None        # nothing has played since this time (None = playing or not checked yet)
+        self.mic_fail_until = -math.inf
+        self.mic_error = ""
+        self.grace_until = -math.inf  # no manual-change detection before this (after a call-profile spell)
+        self.hold_target = None       # sent once the rate limiter allows (a conversation ended by media)
         self.thread = None
 
     # ---- control ----
     def set(self, **kw):
-        """Change settings. enabled=True also clears a manual pause; enabled=False stops and restores."""
+        """Change settings. enabled=True also clears a manual pause; enabled=False stops."""
         with self.lock:
             was = self.settings.enabled
             self.settings.update(kw)
@@ -537,12 +559,12 @@ class AdaptiveRunner:
             if "enabled" in kw:
                 if self.settings.enabled:
                     self.policy.resume()
+                    self.mic_fail_until = -math.inf
+                    self.mic_error = ""
                 elif was:
                     self._stop_listening()
-                    self._unduck()
                     self.policy.reset()
-            if "mic" in kw and self.cap is not None:
-                self._close()             # reopen on the new mic
+                self.hold_target = None
             self._save(self.settings.as_dict())
         self.wake.set()
         return self.state()
@@ -554,16 +576,15 @@ class AdaptiveRunner:
                 return False
             self.policy.manual(self.clock())
             self._stop_listening()
-            self._unduck()
+            self.hold_target = None
             self.log(f"crusher adaptive: paused ({source})")
         self.wake.set()
         return True
 
     def shutdown(self):
-        """Close the mic and put the volume back (the program is exiting)."""
+        """Close the mic (the program is exiting)."""
         with self.lock:
             self._stop_listening()
-            self._unduck()
 
     def state(self):
         with self.lock:
@@ -576,6 +597,10 @@ class AdaptiveRunner:
                 "enabled": self.settings.enabled,
                 "listening": self.cap is not None,
                 "mic": self.mic_open,
+                "phase": self.phase,
+                "music_hold": self.phase in ("music", "quiet_wait"),
+                "media_playing": bool(self.last_media[1]),
+                "mic_error": self.mic_error,
                 "status": self.status,
                 "error": self.error,
                 "ambient_db": round(r.level, 1) if r else None,
@@ -583,7 +608,6 @@ class AdaptiveRunner:
                 "zone": self.policy.zone,
                 "steady": self.policy.steady,
                 "speech": bool(r and r.speech),
-                "held": bool(r and r.held),
                 "conversation": self.policy.conv,
                 "target": self.policy.applied.as_dict() if self.policy.applied else None,
                 "paused_for_s": None if paused == math.inf else round(paused),
@@ -595,6 +619,8 @@ class AdaptiveRunner:
     # ---- internals ----
     def _close(self):
         c, self.cap = self.cap, None
+        if c is not None:
+            self.grace_until = self.clock() + self.MANUAL_GRACE_S
         self.mic_open = ""
         if c is not None:
             try:
@@ -608,14 +634,6 @@ class AdaptiveRunner:
             self.meter.reset()
         self.last = None
 
-    def _unduck(self):
-        if self.ducked and self.duck:
-            try:
-                self.duck(False)
-            except Exception as e:
-                self.log(f"crusher adaptive: restore volume: {e!r}")
-        self.ducked = False
-
     def _cached(self, attr, fn, every, now):
         t, v = getattr(self, attr)
         if now - t >= every:
@@ -625,6 +643,32 @@ class AdaptiveRunner:
                 v = False
             setattr(self, attr, (now, v))
         return v
+
+    def _media(self, now):
+        """Is anything playing (cached for MEDIA_CHECK_S)? An error counts as playing: never risk call mode."""
+        t, v = self.last_media
+        if now - t >= self.MEDIA_CHECK_S:
+            try:
+                v = bool(self.media_playing()) if self.media_playing else True
+            except Exception:
+                v = True
+            self.last_media = (now, v)
+            if v:
+                self.idle_since = None
+            elif self.idle_since is None:
+                self.idle_since = now
+        return v
+
+    def may_listen(self, now):
+        """True when the Crusher's mic may be open: nothing has played for HEADSET_IDLE_S (and it didn't just
+        fail to open)."""
+        if self._media(now) or now < self.mic_fail_until:
+            return False
+        return self.idle_since is not None and now - self.idle_since >= self.HEADSET_IDLE_S
+
+    def _holding(self):
+        a = self.policy.applied
+        return a.label() if a else "the current mode"
 
     def apply(self, target, now):
         """Send one target (rate limited). Returns True if it was sent and committed."""
@@ -641,12 +685,6 @@ class AdaptiveRunner:
             self.limiter.mark(now, extra=7.0)
             return False
         self.limiter.mark(now)
-        if target.duck != self.ducked and self.duck:
-            try:
-                self.duck(target.duck)
-                self.ducked = target.duck
-            except Exception as e:
-                self.log(f"crusher adaptive: volume: {e!r}")
         self.error = ""
         self.last_send = now
         self.policy.committed(target, now)
@@ -660,7 +698,6 @@ class AdaptiveRunner:
             self.meter = AmbientMeter(self.rate)
         for r in self.meter.feed(block):
             now = self.clock() if now is None else now
-            r.held = self._cached("last_gate", self.gate, self.GATE_CHECK_S, now)
             self.last = r
             t = self.policy.tick(r, now)
             if t is not None:
@@ -671,10 +708,34 @@ class AdaptiveRunner:
         a = self.policy.applied
         if mode is None or a is None or now - self.last_send < self.MANUAL_GRACE_S:
             return False
+        if self.cap is not None or now < self.grace_until:
+            return False          # the call profile can change what the headset reports
         if mode != a.mode:
             self.manual("changed on the headset or elsewhere")
             return True
         return False
+
+    def _check_mode(self, now):
+        if now - self.last_mode_check < self.MODE_CHECK_S or self.policy.applied is None:
+            return
+        self.last_mode_check = now
+        try:
+            m = self.read_mode()
+        except Exception:
+            m = None
+        self.observe(m, now)
+
+    def hold(self, now):
+        """Not listening because something plays (or just played, or the mic failed): close the mic, end a
+        conversation (sending the room's mode) and keep the last decided mode. Returns the wait."""
+        if self.cap is not None:
+            self._stop_listening()
+            self.hold_target = self.policy.end_conversation()
+        if self.hold_target is not None:
+            if self.hold_target == self.policy.applied or self.apply(self.hold_target, now):
+                self.hold_target = None
+        self._check_mode(now)
+        return self.MEDIA_CHECK_S
 
     def step(self):
         """One pass of the loop. Returns how long to wait before the next pass (0 = read audio again now)."""
@@ -682,54 +743,67 @@ class AdaptiveRunner:
             now = self.clock()
             if not self.settings.enabled:
                 self._stop_listening()
-                self.status = "off"
+                self.status = self.phase = "off"
                 return 1.0
             if self.policy.paused(now):
                 self._stop_listening()
                 left = self.policy.paused_for(now)
+                self.phase = "paused"
                 self.status = ("paused after a manual change" +
                                ("" if left == math.inf else f" ({math.ceil(left / 60)} min left)"))
                 return 1.0
             if not self._cached("last_conn", self.connected, self.CONNECT_CHECK_S, now):
                 self._stop_listening()
-                self._unduck()
                 self.policy.reset()
-                self.status = "waiting for the Crusher to connect"
+                self.hold_target = None
+                self.phase = "no_crusher"
+                self.status = "waiting for the Crusher to connect to this device"
                 return 2.0
+            if not self.may_listen(now):
+                wait = self.hold(now)
+                if self.last_media[1]:
+                    self.phase = "music"
+                    self.status = f"paused while music plays (holding {self._holding()})"
+                elif now < self.mic_fail_until:
+                    self.phase = "mic_error"
+                    self.status = (f"the Crusher's mic is not available ({self.mic_error}); trying again in "
+                                   f"{math.ceil(self.mic_fail_until - now)} s (holding {self._holding()})")
+                else:
+                    self.phase = "quiet_wait"
+                    left = self.HEADSET_IDLE_S - (now - (self.idle_since if self.idle_since is not None else now))
+                    self.status = (f"paused while music plays: listening again in {max(1, math.ceil(left))} s "
+                                   f"(holding {self._holding()})")
+                return wait
             if self.cap is None:
                 try:
-                    self.cap = self.open_capture(self.settings.mic)
-                    self.mic_open = getattr(self.cap, "label", "") or self.settings.mic or "auto"
-                    self.error = ""
+                    self.cap = self.open_headset()
+                    self.mic_open = getattr(self.cap, "label", "") or "Crusher mic"
+                    self.mic_error = ""
+                    if self.meter is not None:
+                        self.meter.reset()
+                    self.last = None
                 except Exception as e:
                     self.cap = None
-                    self.status = "no microphone"
-                    self.error = str(e)
-                    return 5.0
+                    self.mic_error = str(e) or e.__class__.__name__
+                    self.mic_fail_until = now + self.HEADSET_RETRY_S
+                    self.log(f"crusher adaptive: the Crusher's mic: {self.mic_error}")
+                    return 0.0
+            self.phase = "listening"
             cap = self.cap
         block = cap.read(int(self.rate * self.BLOCK_S))      # blocks ~0.25 s, outside the lock
         with self.lock:
             if cap is not self.cap:
                 return 0.0
             if block is None:
-                self._close()
-                self.error = "the microphone stopped"
-                return 2.0
+                self._stop_listening()
+                self.mic_error = "the Crusher's mic stopped"
+                self.mic_fail_until = self.clock() + self.HEADSET_RETRY_S
+                return 0.0
             now = self.clock()
             self.process(block, now)
-            if self.last is None:
-                self.status = "listening..."
-            elif self.last.held:
-                self.status = "holding: the computer's speakers are playing"
-            else:
-                self.status = "adapting"
-            if now - self.last_mode_check >= self.MODE_CHECK_S and self.policy.applied is not None:
-                self.last_mode_check = now
-                try:
-                    m = self.read_mode()
-                except Exception:
-                    m = None
-                self.observe(m, now)
+            self.status = ("listening (Crusher mic, nothing playing)..." if self.last is None
+                           else "adapting (Crusher mic, nothing playing)")
+            self._check_mode(now)
         return 0.0
 
     def run(self):
