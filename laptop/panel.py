@@ -207,7 +207,8 @@ def ap_decode(kind, data):
     if kind == "bool": return {1: True, 2: False}.get(v)
     if kind == "level": return v
     return [m for m, bit in MASK_BITS.items() if v & bit]
-BT={2:"left",4:"right",8:"case"}; BS={1:"discharging",2:"charging",4:"disconnected"}
+# AAP battery component types and states (LibrePods battery.hpp): 2 is the RIGHT bud, 4 the LEFT; 1 charging, 2 discharging
+BT={2:"right",4:"left",8:"case",1:"single"}; BS={0:"unknown",1:"charging",2:"discharging",4:"disconnected"}
 # ---- AirPods battery from their BLE "proximity pairing" broadcast (Apple 0x004C, type 0x07).
 # Works whichever host is playing: the AAP battery reports only reach the active host.
 BLE = {"battery": {}, "t": 0.0}
@@ -452,6 +453,60 @@ class AirPods(threading.Thread):
 
 AP = AirPods(); AP.start()
 
+# ---- Last seen on this laptop: when the AirPods / Crusher Bluetooth link to the laptop came and went.
+# The laptop has no GPS, so an event is just "at the laptop" + time. Kept locally (last 50 per device),
+# served at GET /api/track for the phone app, cleared with POST /api/track/clear. Nothing is sent anywhere.
+TRACK_FILE = os.path.expanduser("~/.local/state/headphone-panel/track.json")
+TRACK_LOCK = threading.Lock()
+def _bt_connected(mac):
+    if not mac: return None
+    try:
+        out = subprocess.run(["bluetoothctl", "info", mac], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    return "Connected: yes" in out
+def track_load():
+    try:
+        with open(TRACK_FILE) as f: d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    for k in ("airpods", "crusher"):
+        d.setdefault(k, {"connected": False, "last_connected": None, "events": []})
+    return d
+TRACK = track_load()
+def track_save():
+    os.makedirs(os.path.dirname(TRACK_FILE), exist_ok=True)
+    tmp = TRACK_FILE + ".tmp"
+    with open(tmp, "w") as f: json.dump(TRACK, f)
+    os.replace(tmp, TRACK_FILE)
+def track_tick(now=None):
+    """One poll: log a connect/disconnect when a link changed since the last poll."""
+    now = now or time.time(); changed = False
+    for dev, mac in (("airpods", AP_MAC), ("crusher", CR_MAC)):
+        c = _bt_connected(mac)
+        if c is None: continue
+        with TRACK_LOCK:
+            d = TRACK[dev]
+            if c: d["last_connected"] = now
+            if c != d["connected"]:
+                d["connected"] = c
+                d["events"] = (d["events"] + [{"t": now, "event": "connected" if c else "disconnected", "where": "laptop"}])[-50:]
+                changed = True
+    if changed:
+        with TRACK_LOCK: track_save()
+def track_loop():
+    while True:
+        try: track_tick()
+        except Exception as e: print("track:", repr(e), flush=True)
+        time.sleep(30)
+threading.Thread(target=track_loop, daemon=True).start()
+def track_state():
+    with TRACK_LOCK: return json.loads(json.dumps(TRACK))
+def track_clear():
+    with TRACK_LOCK:
+        for d in TRACK.values(): d["events"] = []; d["last_connected"] = time.time() if d["connected"] else None
+        track_save()
+
 # ---- Source-side EQ (PipeWire filter-chain), see hp_eq.py ----
 try:
     import hp_eq
@@ -599,6 +654,44 @@ def sound_state():
             "sources": hp_sound.sources(), "listening": SOUND.source, "bins": SOUND.bin_centers(),
             "notch": {k: n.state() for k, n in NOTCH.items()}}
 
+# ---- Crusher Adaptive: the Crusher's own mic hears the room (only while nothing plays), the Crusher's mode
+# follows (hp_adaptive.py, shared/crusher_adaptive.py). Off until turned on; the laptop's mics are never used.
+def _cr_send(cmds):
+    with CR_LOCK: rs = cr_at_each(cmds)
+    bad = [c for c, r in zip(cmds, rs) if "ERROR" in r or not r.strip()]
+    if bad: raise RuntimeError("Crusher refused " + ", ".join(bad))
+    kw = {}
+    for c in cmds:
+        if c == "AT.UIAUDIO=anc,on": kw.update(anc=True, transparency=False)
+        elif c == "AT.UIAUDIO=transparency,on": kw.update(anc=False, transparency=True)
+        elif c == "AT.UIAUDIO=anc,off": kw["anc"] = False
+        elif c == "AT.UIAUDIO=transparency,off": kw["transparency"] = False
+        elif c.startswith("AT.UIAUDIO=transparency,,"):
+            if CR_EXTRAS["v"] is not None: CR_EXTRAS["v"]["transparency_level"] = int(c.rsplit(",", 1)[1])
+    crusher_cache_set(**kw)
+def _cr_mode_now():
+    v = crusher_state_live()
+    if not v.get("online"): return None
+    if CR_CACHE["v"]: CR_CACHE.update(t=time.time(), v={**CR_CACHE["v"], **v})
+    return hp_adaptive.ca.mode_of(v)
+try:
+    import hp_adaptive
+    ADAPTIVE = hp_adaptive.make_runner(
+        send=_cr_send, read_mode=_cr_mode_now, connected=crusher_connected,
+        has_level=lambda: "transparency_level" in (crusher_extras() or {}),
+        log=lambda m: print(m, flush=True), mac=CR_MAC).start()
+    ADAPTIVE_ERR = "" if ADAPTIVE.state()["available"] else "numpy is not installed"
+except Exception as e:
+    ADAPTIVE = None; ADAPTIVE_ERR = str(e)
+def adaptive_state(full=False):
+    if not ADAPTIVE: return {"available": False, "error": ADAPTIVE_ERR}
+    st = ADAPTIVE.state()
+    if not st["available"]: st["error"] = ADAPTIVE_ERR
+    return st
+def crusher_manual():
+    """A Crusher mode was picked by hand: Adaptive steps aside (for its pause time)."""
+    if ADAPTIVE: ADAPTIVE.manual("changed in the panel")
+
 HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html"), encoding="utf-8").read()
 
 class H(BaseHTTPRequestHandler):
@@ -631,13 +724,19 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/" : return self._s(200,HTML,"text/html; charset=utf-8")
         if self.path=="/api/caps":
             # which controls exist right now: the flick ring hides the rest
-            return self._s(200,json.dumps({"crusher":crusher_connected(),"airpods":AP.online,
+            cc=crusher_connected()
+            return self._s(200,json.dumps({"crusher":cc,"airpods":AP.online,
+                                           "crusher_adaptive":bool(cc and ADAPTIVE and adaptive_state()["available"]),
                                            "eq":bool(EQ and EQ.available())}))
         if self.path=="/api/state":
-            return self._s(200,json.dumps({"crusher":{**crusher_state(),"rumble":rumble_state()},"airpods":AP.state(),"eq":eq_state(),
+            return self._s(200,json.dumps({"crusher":{**crusher_state(),"rumble":rumble_state(),"adaptive":adaptive_state()},"airpods":AP.state(),"eq":eq_state(),
                                            "spatial":spatial_state(),"rumble":rumble_state()}))
         if self.path=="/api/spatial":
             return self._s(200,json.dumps(spatial_state()))
+        if self.path=="/api/track":
+            return self._s(200,json.dumps(track_state()))
+        if self.path=="/api/crusher/adaptive":
+            return self._s(200,json.dumps(adaptive_state(full=True)))
         if self.path=="/api/eq":
             return self._s(200,json.dumps(eq_state()))
         self._s(404,"{}")
@@ -645,6 +744,12 @@ class H(BaseHTTPRequestHandler):
         n=int(self.headers.get("content-length",0)); body=self.rfile.read(n).decode().strip()
         try:
             if self.path=="/api/crusher/mode":
+                if body=="adaptive":
+                    if not ADAPTIVE or not adaptive_state()["available"]:
+                        return self._s(503,json.dumps({"error":"Adaptive unavailable: "+(ADAPTIVE_ERR or "?")}))
+                    return self._s(200,json.dumps(ADAPTIVE.set(enabled=True)))
+                if body not in ("anc","transparency","off"): return self._s(400,json.dumps({"error":"unknown mode"}))
+                crusher_manual()
                 with CR_LOCK:
                     if body=="anc": cr_at(["AT.UIAUDIO=transparency,off","AT.UIAUDIO=anc,on"]); crusher_cache_set(anc=True,transparency=False)
                     elif body=="transparency": cr_at(["AT.UIAUDIO=transparency,on"]); crusher_cache_set(anc=False,transparency=True)
@@ -665,10 +770,19 @@ class H(BaseHTTPRequestHandler):
                 ok,echoed=AP.set_setting(j["name"], j.get("value"))
                 if not ok: return self._s(503,json.dumps({"error":"AirPods not connected"}))
                 return self._s(200,json.dumps({"echoed":echoed,"settings":AP.settings(),"reported":AP.reported()}))
+            if self.path=="/api/track/clear":
+                track_clear(); return self._s(200,json.dumps(track_state()))
             if self.path=="/api/airpods/refresh":
                 return self._s(200 if AP.refresh() else 503,json.dumps({"reported":AP.reported()}))
+            if self.path=="/api/crusher/adaptive":
+                if not ADAPTIVE: return self._s(503,json.dumps({"error":ADAPTIVE_ERR}))
+                j=json.loads(body or "{}")
+                keep={k:v for k,v in j.items() if k in ("enabled","sensitivity","conversation","pause_min")}
+                ADAPTIVE.set(**keep)
+                return self._s(200,json.dumps(adaptive_state(full=True)))
             if self.path=="/api/crusher/setting":
                 j=json.loads(body or "{}")
+                if j.get("name")=="transparency_level": crusher_manual()
                 crusher_setting(j.get("name"), j.get("value"))
                 return self._s(200,"{}")
             if self.path in ("/api/eq","/api/eq/cycle"):
@@ -719,6 +833,7 @@ class H(BaseHTTPRequestHandler):
 if __name__=="__main__":
     import signal, sys
     def cleanup():
+        if ADAPTIVE: ADAPTIVE.shutdown()   # close the mic, put the media volume back
         if SOUND: SOUND.stop(wait=True)
         for n in NOTCH.values(): n.shutdown()
         if SPATIAL: SPATIAL.shutdown()

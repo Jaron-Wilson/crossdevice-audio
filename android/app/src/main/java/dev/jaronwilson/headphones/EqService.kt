@@ -137,11 +137,14 @@ class EqService : Service() {
                     // doesn't make everything quieter
                     fx.effect.setInputGainAllChannelsTo(EqModel.preampLimited(bands, g).toFloat())
                     if (fx.mbc) {
-                        // Rumble: gently compress the band below 120 Hz (2.5:1 from -24 dB, +3 dB makeup) so
-                        // the sub-bass is dense rather than a few peaks the limiter squashes
-                        val on = EqModel.subBoosted(bands, g)
+                        // Bass or sub boosted: compress the band below 120 Hz with the laptop's numbers
+                        // (-8 dBFS, 4:1, 5/150 ms, 6 dB knee, no makeup), so big bass hits are tamed there
+                        // instead of the limiter ducking the whole mix
+                        val on = EqModel.lowBoosted(bands, g)
                         val m = DynamicsProcessing.Mbc(true, on, 2)
-                        m.setBand(0, DynamicsProcessing.MbcBand(on, 120f, 10f, 150f, 2.5f, -24f, 6f, -90f, 1f, 0f, 3f))
+                        m.setBand(0, DynamicsProcessing.MbcBand(on, EqModel.LOWCOMP_HZ, EqModel.LOWCOMP_ATTACK_MS,
+                            EqModel.LOWCOMP_RELEASE_MS, EqModel.LOWCOMP_RATIO, EqModel.LOWCOMP_THRESHOLD_DB,
+                            EqModel.LOWCOMP_KNEE_DB, -90f, 1f, 0f, 0f))
                         m.setBand(1, DynamicsProcessing.MbcBand(false, 20000f, 3f, 80f, 1f, 0f, 0f, -90f, 1f, 0f, 0f))
                         fx.effect.setMbcAllChannelsTo(m)
                     }

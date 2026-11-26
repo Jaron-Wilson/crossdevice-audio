@@ -96,7 +96,9 @@ object CrusherDirect {
             val out = sock.outputStream
             val input = sock.inputStream
             for (c in cmds) {
-                out.write((c + "\r").toByteArray()); out.flush()
+                val pkt = (c + "\r").toByteArray()
+                out.write(pkt); out.flush()
+                PacketLog.crusher(context, true, pkt)
                 Thread.sleep(350)
                 if (!read) continue
                 val sb = StringBuilder()
@@ -110,6 +112,7 @@ object CrusherDirect {
                     } else Thread.sleep(40)
                 }
                 replies += sb.toString()
+                PacketLog.crusher(context, false, sb.toString().toByteArray(Charsets.ISO_8859_1))
             }
         } finally {
             runCatching { sock.close() }
@@ -121,7 +124,10 @@ object CrusherDirect {
     // AT.UIAUDIO=transparency|atoncall|atonpause answer with on/off ONLY (there is no transparency
     // level, and anc_filter / samplingrate / AT.VOLUME? / AT.FEATURE=enable are ERROR), so no level
     // control exists and we never send commands we have not seen answered. Read once per connection.
-    private val EXTRA_Q = linkedMapOf("at_on_call" to "AT.UIAUDIO=atoncall", "at_on_pause" to "AT.UIAUDIO=atonpause")
+    // transparency_level is asked too (as the laptop does): a firmware that answers it with a number has a
+    // level, which Crusher Adaptive then uses; this one does not, so Adaptive maps "moderate" to Off.
+    private val EXTRA_Q = linkedMapOf("transparency_level" to "AT.UIAUDIO=transparency",
+        "at_on_call" to "AT.UIAUDIO=atoncall", "at_on_pause" to "AT.UIAUDIO=atonpause")
     @Volatile private var extras: JSONObject? = null
 
     private fun answered(r: String) = r.contains("OK") && !r.contains("ERROR")
@@ -133,6 +139,10 @@ object CrusherDirect {
         val out = JSONObject()
         for ((k, r) in EXTRA_Q.keys.zip(replies)) {
             if (!answered(r)) continue
+            if (k == "transparency_level") {
+                Regex(":\\s*(?:on|off)?\\s*,\\s*(\\d+)").find(r)?.let { out.put(k, it.groupValues[1].toInt()) }
+                continue
+            }
             Regex(":\\s*(on|off)").find(r)?.let { out.put(k, it.groupValues[1] == "on") }
         }
         // read-only feature flags: AT.FEATURE=count, then AT.FEATURE=info,0,<count> ("name,id,policy,x,enabled|disabled")
@@ -163,6 +173,23 @@ object CrusherDirect {
         val r = sessionEach(context, listOf(cmd), read = true).firstOrNull() ?: ""
         if (!answered(r)) error("Crusher refused $cmd")
         if (name != "bass_on") extras?.put(name, value)
+    }
+
+    /** Does this firmware answer the transparency level (read once per connection with the extras)? */
+    fun hasLevel(context: Context): Boolean = runCatching { readExtras(context).has("transparency_level") }.getOrDefault(false)
+
+    /** Send AT commands in one session; throws if the Crusher refuses one or does not answer. */
+    fun sendCommands(context: Context, cmds: List<String>) {
+        val rs = sessionEach(context, cmds, read = true)
+        val bad = cmds.filterIndexed { i, _ -> !answered(rs.getOrElse(i) { "" }) }
+        if (bad.isNotEmpty()) error("Crusher refused " + bad.joinToString(", "))
+    }
+
+    /** "anc" | "transparency" | "off" as the Crusher reports it now, or null if it is not reachable. */
+    fun modeNow(context: Context): String? {
+        val st = state(context) ?: return null
+        if (!st.optBoolean("online")) return null
+        return modeOf(st.optBoolean("anc"), st.optBoolean("transparency"))
     }
 
     /** Set the noise mode: "anc", "transparency", or "off". */
@@ -212,21 +239,29 @@ object CrusherDirect {
         if (!connected(context)) { extras = null; return null }
         val txt = runCatching { session(context, listOf("AT.UIAUDIO?", "AT.CRUSHER?"), read = true) }
             .getOrElse { return JSONObject().put("online", false) }
-        val anc = Regex("anc:\\s*(on|off)").find(txt)?.groupValues?.get(1) == "on"
-        val transparency = Regex("transparency:\\s*(on|off)").find(txt)?.groupValues?.get(1) == "on"
-        val lvl = Regex("level:\\s*(\\d+)\\s*/\\s*(\\d+)").find(txt)
-        val bassOn = Regex("(?i)state:\\s*(on|off)").find(txt)?.groupValues?.get(1)?.lowercase()
+        val r = parseState(txt)
         return JSONObject()
             .put("online", true)
-            .put("anc", anc)
-            .put("transparency", transparency)
+            .put("anc", r.anc == true)
+            .put("transparency", r.transparency == true)
             .put("extras", readExtras(context))
             .apply {
-                if (bassOn != null) put("bass_on", bassOn == "on")
-                if (lvl != null) {
-                    put("bass", lvl.groupValues[1].toInt())
-                    put("bass_max", lvl.groupValues[2].toInt())
+                r.bassOn?.let { put("bass_on", it) }
+                if (r.bass != null) {
+                    put("bass", r.bass)
+                    put("bass_max", r.bassMax)
                 }
             }
+    }
+
+    /** What a reply says; null for anything it doesn't mention. Pure, so the packet view and tests use it too. */
+    data class Reply(val anc: Boolean?, val transparency: Boolean?, val bass: Int?, val bassMax: Int?, val bassOn: Boolean?)
+
+    /** Parse `anc: on`, `transparency: off`, `level: 5 / 10` and `state: ON` out of AT.UIAUDIO? / AT.CRUSHER? replies. */
+    fun parseState(txt: String): Reply {
+        fun onOff(key: String) = Regex("(?i)$key:\\s*(on|off)").find(txt)?.groupValues?.get(1)?.lowercase()?.let { it == "on" }
+        val lvl = Regex("level:\\s*(\\d+)\\s*/\\s*(\\d+)").find(txt)
+        return Reply(onOff("anc"), onOff("transparency"), lvl?.groupValues?.get(1)?.toInt(),
+            lvl?.groupValues?.get(2)?.toInt(), onOff("state"))
     }
 }

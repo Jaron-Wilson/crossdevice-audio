@@ -1,0 +1,24 @@
+Models used by Filtered hearing (Headphones app), run on the phone with ONNX Runtime (MIT License).
+
+1. dfn3_stream.onnx (in this folder, 16 MB)
+   DeepFilterNet3, Copyright (c) 2021 Hendrik Schröter, https://github.com/Rikorose/DeepFilterNet
+   Dual-licensed MIT or Apache-2.0 (LICENSE-DeepFilterNet-MIT.txt, LICENSE-Apache-2.0.txt); used here under MIT.
+   The official DeepFilterNet3 weights (checkpoint model_120.ckpt.best, as downloaded by the deepfilternet 0.5.6
+   Python package), exported as a single-frame streaming ONNX graph with the "torchDF" streaming wrapper by
+   Aleksandr Grazhdankin (github.com/grazder/DeepFilterNet, branch torchDF-changes, commit 1097015d), same
+   licence. Export script: android/tools/export_dfn3_stream.py.
+   SHA-256 9df53e58c1c8bfe202c55f8dbde68a9ad0b7c18af6409997efe11d50a781f21e
+
+   Schröter, Escalante-B., Rosenkranz, Maier: "DeepFilterNet: Perceptually Motivated Real-Time Speech
+   Enhancement", Interspeech 2023.
+
+2. campplus_en_voxceleb.onnx (not committed: downloaded at build time and checked, 29.6 MB)
+   CAM++ speaker verification model trained on VoxCeleb, from 3D-Speaker (Alibaba Tongyi Lab),
+   https://github.com/modelscope/3D-Speaker, model iic/speech_campplus_sv_en_voxceleb_16k on ModelScope,
+   Apache License 2.0 (LICENSE-Apache-2.0.txt). ONNX conversion by the sherpa-onnx project (k2-fsa,
+   Apache-2.0): https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
+   (3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx),
+   SHA-256 357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b
+
+   Wang, Zheng, Chen, Zhang, Chen: "CAM++: A Fast and Efficient Network for Speaker Verification Using
+   Context-Aware Masking", Interspeech 2023.

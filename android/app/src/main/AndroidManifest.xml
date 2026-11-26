@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Ear detection: one quiet link to the AirPods while they are connected (a "connected device" service) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Smart adaptive: "are you walking" from the phone's motion sensors (asked when you turn it on) -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
@@ -20,6 +22,17 @@
     <!-- Live Translation: the AirPods' mics (only while you have it on), as a microphone foreground service -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Filtered hearing: plays the cleaned room sound to the AirPods with the screen off (only while it is on) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Last seen (optional, asked on the Last seen screen): the phone's location when headphones disconnect,
+         stored on the phone only. Background location only if you choose "Allow all the time". -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- the finder's "closer = faster" buzz; the map's tile cache checks for a network -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- package visibility: the phone's speech recognizer and text-to-speech engine -->
     <queries>
@@ -36,6 +49,7 @@
         <activity
             android:name=".SetupActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -50,9 +64,63 @@
             android:launchMode="singleTop"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
 
+        <!-- What your AirPods hear: their own mics over AAP (no call mode), only while this screen is open -->
+        <activity
+            android:name=".ListenActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Filtered hearing benchmark: no launcher entry; only the shell (adb, which holds DUMP) can open it.
+             Synthetic audio in memory; plays nothing. -->
+        <activity
+            android:name=".BenchActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Filtered hearing: keeps the AirPods' mic stream and the playback going with the screen off -->
+        <service
+            android:name=".HearingService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Packets: the Bluetooth bytes this app sends and reads, decoded and masked, in memory only -->
+        <activity
+            android:name=".PacketsActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Last seen: map, history, permissions -->
+        <activity
+            android:name=".TrackActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Hotter / colder finder (scans only while open) -->
+        <activity
+            android:name=".FinderActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- A few seconds of location right after a disconnect, then it stops itself -->
+        <service
+            android:name=".LocateService"
+            android:exported="false"
+            android:foregroundServiceType="location|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Saves when headphones disconnected, for the user's own Last seen history on the phone" />
+        </service>
+
         <!-- Live Translation: holds the AirPods' mic (Bluetooth SCO) while a session runs -->
         <service
             android:name=".LiveTranslateService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Crusher Adaptive: the Crusher's own mic (Bluetooth call mode) hears the room, only while it is on and nothing has played for 10 s -->
+        <service
+            android:name=".CrusherAdaptiveService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
@@ -78,6 +146,12 @@
             </intent-filter>
         </receiver>
 
+        <!-- Ear detection: holds the AirPods' AAP link while they're on this phone, for their in-ear reports -->
+        <service
+            android:name=".EarService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
         <!-- keeps the EQ effects alive while the app isn't on screen -->
         <service
             android:name=".EqService"
@@ -94,6 +168,13 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Crusher Adaptive after a reboot: Android won't start a microphone service from boot, so this only posts "tap to resume" -->
+        <receiver android:name=".CrusherAdaptiveBoot" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 
